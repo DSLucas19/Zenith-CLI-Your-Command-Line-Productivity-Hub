@@ -1,0 +1,14 @@
+[
+    {
+        "id": "e7502a54",
+        "title": "Weekly Report",
+        "interval_type": "weeks",
+        "interval_value": 1,
+        "next_due_date": "2026-01-18T13:14:02.819503",
+        "category": [
+            "Work"
+        ],
+        "priority": 1,
+        "time_duration": null
+    }
+]

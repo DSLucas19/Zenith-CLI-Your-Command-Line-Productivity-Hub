@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+build/
+dist/
+
+# Application Data (JSON files are local state)
+*.json
+!categories.json
+!recurrent_tasks.json
+# Note: Usually users might want to exclude their tasks.json/history.json
+# I'll exclude everything by default but maybe keep templates?
+# Standard practice for CLI tools: exclude all local state.
+
+# Large Files
+ascii-animation.gif
+
+# IDEs
+.vscode/
+.idea/
+*.swp

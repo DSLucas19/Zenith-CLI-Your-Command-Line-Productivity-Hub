@@ -1,0 +1,1578 @@
+import typer
+from rich import print
+from rich.table import Table
+from rich.console import Console
+from rich import box
+from typing import Optional, List
+from datetime import datetime
+import questionary
+from dateutil import parser as date_parser
+
+from models import Task, Goal
+from storage import load_tasks, save_tasks
+from goals_storage import load_goals, save_goals
+from categories_storage import load_categories, save_categories
+from history_storage import load_history, add_to_history, save_history
+from notes_storage import load_notes, save_notes, Note
+import ui
+from rich.align import Align
+from config_storage import load_config, save_config, get_theme
+
+app = typer.Typer(help="Fast CLI TDL App with Rainbow Dashboard")
+console = Console()
+
+def parse_duration(duration_str: str) -> Optional[int]:
+    """Parse duration string in format XXhXXmXXs to total seconds."""
+    import re
+    
+    # Match pattern like "2h30m15s", "1h", "30m", "45s", etc.
+    pattern = r'(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?'
+    match = re.fullmatch(pattern, duration_str.lower())
+    
+    if not match or not any(match.groups()):
+        return None
+    
+    hours = int(match.group(1) or 0)
+    minutes = int(match.group(2) or 0)
+    seconds = int(match.group(3) or 0)
+    
+    return hours * 3600 + minutes * 60 + seconds
+
+def configure_recurrence():
+    """Interactive recurrence configuration. Returns (type, days, interval) or (None, None, 1) if cancelled."""
+    
+    recurrence_choices = [
+        questionary.Choice("Daily", value="daily"),
+        questionary.Choice("Weekly", value="weekly"),
+        questionary.Choice("Monthly", value="monthly"),
+        questionary.Choice("Custom days", value="custom"),
+        questionary.Choice("Cancel", value="__CANCEL__")
+    ]
+    
+    rec_type = questionary.select(
+        "Select recurrence type:",
+        choices=recurrence_choices
+    ).ask()
+    
+    if rec_type == "__CANCEL__" or rec_type is None:
+        return None, None, 1
+    
+    recurrence_days = None
+    recurrence_interval = 1
+    
+    if rec_type == "custom":
+        # Let user pick specific days
+        day_choices = [
+            questionary.Choice("Monday", value=0),
+            questionary.Choice("Tuesday", value=1),
+            questionary.Choice("Wednesday", value=2),
+            questionary.Choice("Thursday", value=3),
+            questionary.Choice("Friday", value=4),
+            questionary.Choice("Saturday", value=5),
+            questionary.Choice("Sunday", value=6)
+        ]
+        recurrence_days = questionary.checkbox(
+            "Select days:",
+            choices=day_choices
+        ).ask()
+        
+        if not recurrence_days:
+            return None, None, 1
+    
+    elif rec_type in ["weekly", "monthly"]:
+        # Ask for interval
+        interval_str = questionary.text(
+            f"Repeat every how many {'weeks' if rec_type == 'weekly' else 'months'}? (default: 1)"
+        ).ask()
+        
+        if interval_str and interval_str.isdigit():
+            recurrence_interval = int(interval_str)
+    
+    return rec_type, recurrence_days, recurrence_interval
+
+
+def get_recurrence_display(task) -> str:
+    """Get human-readable recurrence description."""
+    if not task.recurrent or not task.recurrence_type:
+        return ""
+    
+    day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    
+    if task.recurrence_type == "daily":
+        return "Daily"
+    elif task.recurrence_type == "weekly":
+        interval = task.recurrence_interval or 1
+        return f"Every {interval} week{'s' if interval > 1 else ''}"
+    elif task.recurrence_type == "monthly":
+        interval = task.recurrence_interval or 1
+        return f"Every {interval} month{'s' if interval > 1 else ''}"
+    elif task.recurrence_type == "custom" and task.recurrence_days:
+        days_str = ", ".join([day_names[d] for d in task.recurrence_days])
+        return f"Every {days_str}"
+    
+    return task.recurrence_type
+
+@app.command()
+def add(
+    title: Optional[str] = typer.Argument(None, help="The task description"),
+    category: Optional[str] = typer.Option(None, "-c", help="Category for the task"),
+    due: Optional[str] = typer.Option(None, "-d", help="Due date/time (e.g. 'tomorrow', '2023-10-25')"),
+    time: Optional[str] = typer.Option(None, "-t", help="Time duration (e.g. '2h30m', '45m', '1h30m15s')"),
+    flag: Optional[int] = typer.Option(None, "-f", "--flag", help="Set priority: -1=unimportant, 0=normal, 1=important"),
+    rc: bool = typer.Option(False, "-r", "--rc", help="Make this a recurring task")
+):
+    """Add a new task rapidly."""
+    interactive = False
+    if not title:
+        interactive = True
+        title = questionary.text("Task:").ask()
+        if not title:
+            return
+    
+    if not category and interactive:
+        category = questionary.text("Category (Optional):").ask()
+        if category == "":
+            category = None
+    
+    # Parse categories - support comma-separated values
+    parsed_categories = None
+    if category:
+        # Split by comma and strip whitespace, then normalize to title case
+        categories_list = [c.strip().capitalize() for c in category.split(',') if c.strip()]
+        parsed_categories = categories_list if categories_list else None
+            
+    due_date = None
+    if due:
+        lower_due = due.lower()
+        now = datetime.now()
+        if lower_due == "today":
+            due_date = now
+        elif lower_due == "tomorrow":
+            due_date = now.replace(day=now.day + 1) # simple logic, careful with month end
+            # better logic for tomorrow:
+            from datetime import timedelta
+            due_date = now + timedelta(days=1)
+        else:
+            try:
+                due_date = date_parser.parse(due)
+            except:
+                print(f"[red]Could not parse date: {due}[/]")
+                return
+    elif interactive:
+        # Only prompt in full interactive mode
+        add_date = questionary.confirm("Add due date?", default=False).ask()
+        if add_date:
+            date_str = questionary.text("Due Date:").ask()
+            if date_str:
+                try:
+                    due_date = date_parser.parse(date_str)
+                except:
+                    print(f"[red]Could not parse date.[/]")
+    
+    # Parse time duration
+    duration_seconds = None
+    if time:
+        duration_seconds = parse_duration(time)
+        if duration_seconds is None:
+            print(f"[red]Invalid duration format: {time}. Use format like '2h30m15s'[/]")
+            return
+            
+    # Set priority from flag
+    priority = 0
+    if flag is not None:
+        if flag not in [-1, 0, 1]:
+            print(f"[red]Invalid priority: {flag}. Use -1 (unimportant), 0 (normal), or 1 (important)[/]")
+            return
+        priority = flag
+    
+    # Handle recurrence
+    recurrence_type = None
+    recurrence_days = None
+    recurrence_interval = 1
+    
+    if rc:
+        recurrence_type, recurrence_days, recurrence_interval = configure_recurrence()
+        if recurrence_type is None:
+            print("[yellow]Recurrence setup cancelled.[/]")
+            rc = False
+    
+    tasks = load_tasks()
+    new_task = Task(
+        title=title, 
+        category=parsed_categories, 
+        due_date=due_date, 
+        time_duration=duration_seconds, 
+        priority=priority,
+        recurrent=rc,
+        recurrence_type=recurrence_type,
+        recurrence_days=recurrence_days,
+        recurrence_interval=recurrence_interval
+    )
+    tasks.append(new_task)
+    save_tasks(tasks)
+    
+    # Build display message
+    msg = f"[bold green]Task added![/] :rocket: [dim]{new_task.id}[/]"
+    if duration_seconds:
+        msg += f" [yellow]Duration: {new_task.get_duration_str()}[/]"
+    if parsed_categories:
+        msg += f" [cyan]Categories: {', '.join(parsed_categories)}[/]"
+    if priority != 0:
+        priority_names = {-1: "Unimportant", 1: "IMPORTANT"}
+        priority_colors = {-1: "dim", 1: "bold red"}
+        msg += f" [{priority_colors[priority]}]Flag: {priority_names[priority]}[/]"
+    if rc:
+        msg += f" [magenta]🔁 Recurring ({recurrence_type})[/]"
+
+    print(msg)
+
+@app.command()
+@app.command(name="db")  # Alias for fast typing
+def dashboard():
+    """Display all tasks in a dashboard view (Categories & Time)."""
+    tasks = load_tasks()
+    # Filter out calendar events (tasks starting with 📅)
+    dashboard_tasks = [t for t in tasks if not t.title.startswith("📅")]
+    ui.render_dashboard(dashboard_tasks)
+
+@app.command()
+def today():
+    """Show only tasks due today."""
+    from datetime import datetime
+    tasks = load_tasks()
+    now = datetime.now()
+    today_date = now.date()
+    
+    # Filter tasks due today
+    today_tasks = [t for t in tasks if t.due_date and t.due_date.date() == today_date]
+    
+    # Sort into Tasks and Events
+    events = [t for t in today_tasks if t.title.startswith("📅")]
+    tasks_only = [t for t in today_tasks if not t.title.startswith("📅")]
+
+    console.print("\n[bold red]📅 TODAY[/bold red]")
+    
+    if events:
+        console.print("[bold yellow]Events:[/]")
+        ui.render_task_list(events)
+        if tasks_only:
+             console.print("[bold white]Tasks:[/]")
+    
+    if tasks_only:
+        ui.render_task_list(tasks_only)
+    elif not events:
+        print("[yellow]No tasks due today![/]")
+
+@app.command()
+def tomorrow():
+    """Show only tasks due tomorrow."""
+    from datetime import datetime, timedelta
+    tasks = load_tasks()
+    now = datetime.now()
+    tomorrow_date = (now + timedelta(days=1)).date()
+    
+    # Filter tasks due tomorrow
+    tomorrow_tasks = [t for t in tasks if t.due_date and t.due_date.date() == tomorrow_date]
+    
+    # Sort into Tasks and Events
+    events = [t for t in tomorrow_tasks if t.title.startswith("📅")]
+    tasks_only = [t for t in tomorrow_tasks if not t.title.startswith("📅")]
+    
+    console.print("\n[bold yellow]📅 TOMORROW[/bold yellow]")
+    
+    if events:
+        console.print("[bold yellow]Events:[/]")
+        ui.render_task_list(events)
+        if tasks_only:
+             console.print("[bold white]Tasks:[/]")
+             
+    if tasks_only:
+        ui.render_task_list(tasks_only)
+    elif not events:
+        print("[yellow]No tasks due tomorrow![/]")
+
+@app.command(name="this-week")
+def this_week():
+    """Show only tasks due this week (excluding today and tomorrow)."""
+    from datetime import datetime, timedelta
+    tasks = load_tasks()
+    now = datetime.now()
+    today = now.date()
+    tomorrow = today + timedelta(days=1)
+    week_end = today + timedelta(days=7)
+    
+    # Filter tasks due this week (excluding today and tomorrow)
+    week_tasks = [t for t in tasks if t.due_date and tomorrow < t.due_date.date() <= week_end]
+    
+    # Sort into Tasks and Events
+    events = [t for t in week_tasks if t.title.startswith("📅")]
+    tasks_only = [t for t in week_tasks if not t.title.startswith("📅")]
+    
+    console.print("\n[bold green]📅 THIS WEEK[/bold green]")
+    
+    if events:
+        console.print("[bold yellow]Events:[/]")
+        ui.render_task_list(events)
+        if tasks_only:
+             console.print("[bold white]Tasks:[/]")
+
+    if tasks_only:
+        ui.render_task_list(tasks_only)
+    elif not events:
+        print("[yellow]No more tasks due this week![/]")
+
+@app.command(name="this-month")
+def this_month():
+    """Show only tasks due this month (excluding this week)."""
+    from datetime import datetime, timedelta
+    tasks = load_tasks()
+    now = datetime.now()
+    today = now.date()
+    week_end = today + timedelta(days=7)
+    month_end = today + timedelta(days=30)
+    
+    # Filter tasks due this month (excluding this week)
+    month_tasks = [t for t in tasks if t.due_date and week_end < t.due_date.date() <= month_end]
+    
+    # Sort into Tasks and Events
+    events = [t for t in month_tasks if t.title.startswith("📅")]
+    tasks_only = [t for t in month_tasks if not t.title.startswith("📅")]
+    
+    console.print("\n[bold blue]📅 THIS MONTH[/bold blue]")
+    
+    if events:
+        console.print("[bold yellow]Events:[/]")
+        ui.render_task_list(events)
+        if tasks_only:
+             console.print("[bold white]Tasks:[/]")
+
+    if tasks_only:
+        ui.render_task_list(tasks_only)
+    elif not events:
+        print("[yellow]No more tasks due this month![/]")
+
+@app.command()
+def calendar():
+    """View the interactive calendar with arrow key navigation."""
+    tasks = load_tasks()
+    ui.render_calendar_interactive(tasks)
+
+@app.command()
+def event(
+    name: List[str] = typer.Argument(..., help="Event name"),
+    due: Optional[str] = typer.Option(None, "-d", help="Date/time for the event (e.g. 'tomorrow 3pm', '2026-01-15')"),
+    category: Optional[str] = typer.Option(None, "-c", help="Category for the event")
+):
+    """Add a calendar event quickly."""
+    import uuid
+    
+    event_title = " ".join(name)
+    
+    # If no date provided, prompt for it
+    if not due:
+        due = questionary.text("Enter event date/time (e.g. 'tomorrow 3pm', '2026-01-15'):").ask()
+        if not due:
+            print("[yellow]Event cancelled.[/]")
+            return
+    
+    # Parse the date
+    try:
+        parsed_date = date_parser.parse(due, fuzzy=True)
+    except Exception:
+        print(f"[red]Could not parse date: {due}[/]")
+        return
+    
+    # Normalize and split categories (support "a, b" format)
+    categories = None
+    if category:
+        cats = [c.strip().capitalize() for c in category.split(',') if c.strip()]
+        categories = cats if len(cats) > 1 else cats[0] if cats else None
+    
+    # Create the event as a task
+    new_event = Task(
+        id=str(uuid.uuid4()),
+        title=f"📅 {event_title}",
+        category=categories,
+        due_date=parsed_date,
+        completed=False,
+        priority=0
+    )
+    
+    tasks = load_tasks()
+    tasks.append(new_event)
+    save_tasks(tasks)
+    
+    date_str = parsed_date.strftime('%Y-%m-%d %H:%M') if parsed_date.hour or parsed_date.minute else parsed_date.strftime('%Y-%m-%d')
+    print(f"[bold green]📅 Event added![/] {event_title}")
+    print(f"[dim]Date: {date_str}[/]")
+    if categories:
+        if isinstance(categories, list):
+            cat_display = " ".join([f"#{c}" for c in categories])
+        else:
+            cat_display = f"#{categories}"
+        print(f"[dim]Categories: {cat_display}[/]")
+
+@app.command()
+def check():
+    """Interactive task completion."""
+    tasks = load_tasks()
+    open_tasks = [t for t in tasks if not t.completed]
+    
+    if not open_tasks:
+        print("[green]No pending tasks! Good job![/]")
+        return
+
+    # Create choices for checklist
+    choices = []
+    for t in open_tasks:
+        display = f"{t.title}"
+        if t.category:
+            if isinstance(t.category, list):
+                display += f" [{', '.join(t.category)}]"
+            else:
+                display += f" [{t.category}]"
+        if t.due_date:
+            display += f" ({t.due_date.strftime('%m-%d')})"
+        choices.append(questionary.Choice(title=display, value=t.id))
+
+    selected_ids = questionary.checkbox(
+        "Select tasks to complete:",
+        choices=choices,
+    ).ask()
+
+    if selected_ids:
+        count = 0
+        for t in tasks:
+            if t.id in selected_ids:
+                t.completed = True
+                count += 1
+        save_tasks(tasks)
+        
+        # Update streak
+        from streak_storage import update_streak, get_streak_display
+        streak, active = update_streak()
+        print(f"[bold green]Completed {count} tasks![/] {get_streak_display()}")
+    else:
+        print("[yellow]No tasks completed.[/]")
+
+def get_task_by_display_id(display_id: int):
+    """Helper function to get a task by its display ID (1-10)."""
+    tasks = load_tasks()
+    unassigned = [t for t in tasks if not t.due_date]
+    assigned = [t for t in tasks if t.due_date]
+    
+    all_visible = unassigned + assigned
+    
+    if 1 <= display_id <= len(all_visible):
+        return all_visible[display_id - 1], tasks
+    return None, tasks
+
+@app.command()
+def update(
+    task_id: int = typer.Argument(..., help="Task ID to update (1-10)"),
+    category: Optional[str] = typer.Option(None, "-c", help="New category"),
+    due: Optional[str] = typer.Option(None, "-d", help="New due date (e.g. 'today', 'tomorrow', '2023-10-25')"),
+    time: Optional[str] = typer.Option(None, "-t", help="Time duration (e.g. '2h30m', '45m', '1h30m15s')"),
+    flag: Optional[int] = typer.Option(None, "-f", "--flag", help="Set priority: -1=unimportant, 0=normal, 1=important"),
+    rc: Optional[int] = typer.Option(None, "-r", help="Toggle recurrence: 0=off, 1=on (opens config)")
+):
+    """Update a task's category, due date, duration, or importance by its ID."""
+    task, all_tasks = get_task_by_display_id(task_id)
+    
+    if not task:
+        print(f"[red]Task ID {task_id} not found.[/]")
+        return
+    
+    # Update category
+    if category is not None:
+        if category == "":
+            task.category = None
+            print(f"[green]Removed categories[/]")
+        else:
+            # Parse categories - support comma-separated values, normalize to title case
+            categories_list = [c.strip().capitalize() for c in category.split(',') if c.strip()]
+            task.category = categories_list if categories_list else None
+            print(f"[green]Updated categories to: {', '.join(categories_list) if categories_list else 'None'}[/]")
+    
+    # Update due date
+    if due is not None:
+        lower_due = due.lower()
+        now = datetime.now()
+        
+        if lower_due == "today":
+            task.due_date = now
+        elif lower_due == "tomorrow":
+            from datetime import timedelta
+            task.due_date = now + timedelta(days=1)
+        elif lower_due == "none" or lower_due == "":
+            task.due_date = None
+        else:
+            try:
+                task.due_date = date_parser.parse(due)
+            except:
+                print(f"[red]Could not parse date: {due}[/]")
+                return
+        
+        date_str = task.due_date.strftime('%Y-%m-%d %H:%M') if task.due_date else "None"
+        print(f"[green]Updated due date to: {date_str}[/]")
+    
+    # Update time duration
+    if time is not None:
+        if time.lower() in ["none", "", "0"]:
+            task.time_duration = None
+            print(f"[green]Removed time duration[/]")
+        else:
+            duration_seconds = parse_duration(time)
+            if duration_seconds is None:
+                print(f"[red]Invalid duration format: {time}. Use format like '2h30m15s'[/]")
+                return
+            task.time_duration = duration_seconds
+            print(f"[green]Updated time duration to: {Task.get_duration_str(task)}[/]")
+    
+    # Set priority
+    if flag is not None:
+        if flag not in [-1, 0, 1]:
+            print(f"[red]Invalid priority: {flag}. Use -1 (unimportant), 0 (normal), or 1 (important)[/]")
+            return
+        task.priority = flag
+        priority_names = {-1: "unimportant", 0: "normal", 1: "IMPORTANT"}
+        priority_colors = {-1: "dim", 0: "green", 1: "bold red"}
+        print(f"[{priority_colors[flag]}]Task priority set to: {priority_names[flag]}[/]")
+    
+    # Toggle recurrence
+    if rc is not None:
+        if rc == 0:
+            task.recurrent = False
+            task.recurrence_type = None
+            task.recurrence_days = None
+            task.recurrence_interval = 1
+            print("[green]Recurrence disabled[/]")
+        elif rc == 1:
+            rec_type, rec_days, rec_interval = configure_recurrence()
+            if rec_type:
+                task.recurrent = True
+                task.recurrence_type = rec_type
+                task.recurrence_days = rec_days
+                task.recurrence_interval = rec_interval
+                print(f"[magenta]🔁 Recurrence enabled: {get_recurrence_display(task)}[/]")
+            else:
+                print("[yellow]Recurrence setup cancelled[/]")
+        else:
+            print("[red]Invalid rc value. Use 0 to disable, 1 to enable.[/]")
+            return
+    
+    save_tasks(all_tasks)
+    print(f"[bold green]Task '{task.title}' updated![/] ✓")
+
+
+@app.command()
+def delete(
+    task_id: int = typer.Argument(..., help="Task ID to delete (1-10)")
+):
+    """Delete a task by its ID."""
+    task, all_tasks = get_task_by_display_id(task_id)
+    
+    if not task:
+        print(f"[red]Task ID {task_id} not found.[/]")
+        return
+    
+    # Confirm deletion
+    confirm = questionary.confirm(
+        f"Delete task '{task.title}'?",
+        default=False
+    ).ask()
+    
+    if confirm:
+        all_tasks.remove(task)
+        save_tasks(all_tasks)
+        print(f"[bold red]Task '{task.title}' deleted![/] 🗑️")
+    else:
+        print("[yellow]Deletion cancelled.[/]")
+
+
+@app.command()
+def config(
+    task_id: int = typer.Argument(..., help="Task ID to configure recurrence")
+):
+    """Configure recurrence settings for a task."""
+    task, all_tasks = get_task_by_display_id(task_id)
+    
+    if not task:
+        print(f"[red]Task ID {task_id} not found.[/]")
+        return
+    
+    print(f"[cyan]Configuring recurrence for: {task.title}[/]")
+    
+    rec_type, rec_days, rec_interval = configure_recurrence()
+    
+    if rec_type:
+        task.recurrent = True
+        task.recurrence_type = rec_type
+        task.recurrence_days = rec_days
+        task.recurrence_interval = rec_interval
+        save_tasks(all_tasks)
+        print(f"[bold magenta]🔁 Recurrence set: {get_recurrence_display(task)}[/]")
+    else:
+        print("[yellow]Configuration cancelled.[/]")
+
+@app.command(name="rc")
+def rc():
+    """List all recurring tasks."""
+    tasks = load_tasks()
+    recurring = [t for t in tasks if t.recurrent]
+    
+    if not recurring:
+        print("[yellow]No recurring tasks found.[/]")
+        return
+    
+    console.print("\n[bold magenta]🔁 RECURRING TASKS[/bold magenta]\n")
+    
+    table = Table(box=box.ROUNDED, show_header=True, header_style="bold magenta")
+    table.add_column("ID", width=4, style="bold cyan", justify="center")
+    table.add_column("Task", style="white")
+    table.add_column("Recurrence", style="magenta")
+    table.add_column("Due", style="yellow")
+    
+    # Get display IDs
+    unassigned = [t for t in tasks if not t.due_date]
+    assigned = [t for t in tasks if t.due_date]
+    all_visible = unassigned + assigned
+    
+    for task in recurring:
+        display_id = all_visible.index(task) + 1 if task in all_visible else "?"
+        due_str = task.due_date.strftime('%Y-%m-%d') if task.due_date else "-"
+        table.add_row(
+            str(display_id),
+            task.title,
+            get_recurrence_display(task),
+            due_str
+        )
+    
+    console.print(table)
+    console.print()
+
+@app.command(name="rcdel")
+def rc_del(
+    task_id: int = typer.Argument(..., help="Task ID to remove from recurring")
+):
+    """Remove recurrence from a task (keeps the task)."""
+    task, all_tasks = get_task_by_display_id(task_id)
+    
+    if not task:
+        print(f"[red]Task ID {task_id} not found.[/]")
+        return
+    
+    if not task.recurrent:
+        print(f"[yellow]Task '{task.title}' is not recurring.[/]")
+        return
+    
+    task.recurrent = False
+    task.recurrence_type = None
+    task.recurrence_days = None
+    task.recurrence_interval = 1
+    save_tasks(all_tasks)
+    
+    print(f"[green]Recurrence removed from '{task.title}'[/]")
+
+
+@app.command(name="cat")
+def categories():
+    """Display all available categories."""
+
+
+    cats = load_categories()
+    
+    if not cats:
+        print("[yellow]No categories defined yet. Use 'TDL add cat <name>' to create one.[/]")
+        return
+    
+
+    table = Table(box=box.ROUNDED, show_header=True, header_style="bold bright_yellow on black", title="[bold yellow]📁 CATEGORIES[/]")
+    table.add_column("ID", width=4, style="bold cyan", justify="center")
+    table.add_column("Category Name", style="bold yellow")
+    
+    for i, cat in enumerate(cats, start=1):
+        color = ["red", "orange1", "yellow", "green", "blue", "purple", "violet"][(i-1) % 7]
+        table.add_row(
+            f"[bold cyan]{i}[/bold cyan]",
+            f"[bold {color}]{cat}[/bold {color}]"
+        )
+    
+    console.print(table)
+
+# Modify the add command to handle 'cat' subcommand
+@app.command()
+def addcat(
+    name: str = typer.Argument(..., help="Category name to add")
+):
+    """Add a new category to the categories list."""
+    cats = load_categories()
+    
+    if name in cats:
+        print(f"[yellow]Category '{name}' already exists.[/]")
+        return
+    
+    cats.append(name)
+    save_categories(cats)
+    print(f"[bold green]Category '{name}' added![/] ✓")
+
+# Update del to handle both task IDs and category names
+@app.command(name="del")
+def del_alias(
+    identifier: str = typer.Argument(..., help="Task ID (1-10) or category name to delete")
+):
+    """Delete a task by ID or a category by name."""
+    
+    # Check if it's a number (task ID)
+    if identifier.isdigit():
+        delete(int(identifier))
+    else:
+        # It's a category name
+        cats = load_categories()
+        
+        if identifier not in cats:
+            print(f"[red]Category '{identifier}' not found.[/]")
+            return
+        
+        # Confirm deletion
+        confirm = questionary.confirm(
+            f"Delete category '{identifier}'?",
+            default=False
+        ).ask()
+        
+        if confirm:
+            cats.remove(identifier)
+            save_categories(cats)
+            print(f"[bold green]Category '{identifier}' deleted![/] ✓")
+        else:
+            print("Deletion cancelled.")
+
+
+@app.command(name="clear")
+def clear():
+    """Archive all completed tasks to history."""
+    tasks = load_tasks()
+    completed = [t for t in tasks if t.completed]
+    
+    if not completed:
+        print("[yellow]No completed tasks to clean.[/]")
+        return
+    
+    print(f"[yellow]Found {len(completed)} completed task(s):[/]")
+    for t in completed:
+        print(f"  - {t.title}")
+    
+    confirm = questionary.confirm(
+        f"Archive all {len(completed)} completed tasks to history?",
+        default=False
+    ).ask()
+    
+    if confirm:
+        # Add to history
+        add_to_history(completed)
+        # Remove from active tasks
+        tasks = [t for t in tasks if not t.completed]
+        save_tasks(tasks)
+        print(f"[bold green]{len(completed)} task(s) archived to history![/]")
+    else:
+        print("[yellow]Cleaning cancelled.[/]")
+
+
+@app.command(name="clear-all")
+def clear_all():
+    """Delete ALL tasks, history, and categories. Use with caution!"""
+    from rich.console import Console
+    console = Console()
+    
+    # Show warning
+    console.print("[bold red]⚠️  WARNING ⚠️[/bold red]")
+    console.print("[yellow]This will permanently delete:[/yellow]")
+    console.print("  • All active tasks")
+    console.print("  • All completed tasks in history")
+    console.print("  • All categories")
+    console.print()
+    
+
+    
+    # Double confirmation
+    confirm1 = questionary.confirm(
+        "Are you absolutely sure you want to delete EVERYTHING?",
+        default=False
+    ).ask()
+    
+    if not confirm1:
+        print("[green]Operation cancelled. Nothing was deleted.[/]")
+        return
+    
+    confirm2 = questionary.text(
+        "Type 'DELETE EVERYTHING' to confirm:",
+        validate=lambda text: text == "DELETE EVERYTHING"
+    ).ask()
+    
+    if confirm2 != "DELETE EVERYTHING":
+        print("[green]Operation cancelled. Nothing was deleted.[/]")
+        return
+    
+    # Delete everything
+    try:
+        # Clear tasks
+        save_tasks([])
+        
+        # Clear history
+        save_history([])
+        
+        # Clear categories
+        save_categories([])
+
+        # Clear goals
+        if os.path.exists("goals.json"):
+            save_goals([])
+            
+        # Clear recurrent tasks
+        if os.path.exists("recurrent_tasks.json"):
+            with open("recurrent_tasks.json", "w") as f:
+                json.dump([], f)
+        
+        # Clear notes
+        if os.path.exists("notes.json"):
+            save_notes([])
+
+        print("[bold green]✓ All data deleted successfully![/]")
+        print("[dim]Your TDL is now completely clean.[/dim]")
+    except Exception as e:
+        print(f"[red]Error deleting data: {e}[/]")
+
+@app.command()
+def hist():
+    """Display history of archived completed tasks."""
+
+
+    history = load_history()
+    
+    if not history:
+        print("[yellow]No tasks in history. Complete some tasks and run 'TDL clear' to archive them.[/]")
+        return
+    
+
+    table = Table(box=box.ROUNDED, show_header=True, header_style="bold bright_green on black", title="[bold green]✓ COMPLETED TASKS HISTORY[/]")
+    table.add_column("ID", width=4, style="bold cyan", justify="center")
+    table.add_column("Category", style="bold green")
+    table.add_column("Task", style="bold white")
+    table.add_column("Due Date", style="bold magenta")
+    
+    for i, task in enumerate(history, start=1):
+        color = ["red", "orange1", "yellow", "green", "blue", "purple", "violet"][(i-1) % 7]
+        due = task.due_date.strftime('%Y-%m-%d') if task.due_date else "N/A"
+        table.add_row(
+            f"[bold cyan]{i}[/bold cyan]",
+            f"[{color}]{task.category or 'General'}[/{color}]",
+            f"[{color}]{task.title}[/{color}]",
+            f"[{color}]{due}[/{color}]"
+        )
+    
+    console.print(table)
+    print(f"\n[dim]Total: {len(history)} archived tasks[/]")
+
+@app.command(name="info")
+def task_info(
+    task_id: int = typer.Argument(..., help="Task ID to view details (1-10)")
+):
+    """Display detailed information about a task."""
+    task, all_tasks = get_task_by_display_id(task_id)
+    
+    if not task:
+        print(f"[red]Task ID {task_id} not found.[/]")
+        return
+    
+    console = Console()
+    
+    # Create info panel
+    from rich.panel import Panel
+    from rich.text import Text
+    
+    info_text = Text()
+    info_text.append(f"Task ID: ", style="bold cyan")
+    info_text.append(f"{task.id}\n", style="dim")
+    
+    info_text.append(f"Title: ", style="bold cyan")
+    info_text.append(f"{task.title}\n", style="bold white")
+    
+    info_text.append(f"Category: ", style="bold cyan")
+    info_text.append(f"{task.category or 'None'}\n", style="yellow")
+    
+    info_text.append(f"Due Date: ", style="bold cyan")
+    if task.due_date:
+        info_text.append(f"{task.due_date.strftime('%Y-%m-%d %H:%M')}\n", style="magenta")
+    else:
+        info_text.append("Not set\n", style="dim")
+    
+    info_text.append(f"Duration: ", style="bold cyan")
+    if task.time_duration:
+        info_text.append(f"{task.get_duration_str()}\n", style="green")
+    else:
+        info_text.append("Not set\n", style="dim")
+    
+    info_text.append(f"Status: ", style="bold cyan")
+    if task.completed:
+        info_text.append("✓ Completed\n", style="bold green")
+    else:
+        info_text.append("○ Pending\n", style="yellow")
+    
+    info_text.append(f"Priority: ", style="bold cyan")
+    priority_names = {-1: "Unimportant", 0: "Normal", 1: "🚩 IMPORTANT"}
+    priority_colors = {-1: "dim", 0: "white", 1: "bold red"}
+    priority_value = task.priority if hasattr(task, 'priority') else (1 if getattr(task, 'important', False) else 0)
+    info_text.append(priority_names.get(priority_value, "Normal") + "\n", style=priority_colors.get(priority_value, "white"))
+    
+    # Recurrence info
+    if getattr(task, 'recurrent', False):
+        info_text.append(f"\n🔁 Recurring: ", style="bold magenta")
+        info_text.append(f"{get_recurrence_display(task)}\n", style="magenta")
+        if task.recurrence_days:
+            day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            days = ", ".join([day_names[d] for d in task.recurrence_days])
+            info_text.append(f"   Days: ", style="bold cyan")
+            info_text.append(f"{days}\n", style="white")
+    
+    title_style = "bold red" if priority_value == 1 else "bold blue"
+    panel = Panel(info_text, title=f"[{title_style}]Task #{task_id} Details[/]", border_style="blue", padding=(1, 2))
+    console.print(panel)
+
+
+@app.command()
+def work(
+    task_id: int = typer.Argument(..., help="Task ID to enter deep work mode (1-10)")
+):
+    """Enter deep work mode for a task."""
+    task, all_tasks = get_task_by_display_id(task_id)
+    
+    if not task:
+        print(f"[red]Task ID {task_id} not found.[/]")
+        return
+    
+    # Confirm entry into deep work mode
+    print(f"[bold cyan]Task:[/] {task.title}")
+    if task.time_duration:
+        duration_str = task.get_duration_str()
+        print(f"[bold green]Duration:[/] {duration_str}")
+    else:
+        print(f"[yellow]No duration set for this task.[/]")
+    
+    confirm = questionary.confirm(
+        "Enter deep work mode?",
+        default=True
+    ).ask()
+    
+    if not confirm:
+        print("[yellow]Deep work mode cancelled.[/]")
+        return
+    
+    # Check for duration
+    duration_seconds = task.time_duration
+    if not duration_seconds:
+        print("[yellow]Please set a duration for this task.[/]")
+        time_str = questionary.text("Duration (e.g. '2h', '45m', '1h30m'):").ask()
+        
+        if not time_str:
+            print("[red]Deep work mode cancelled.[/]")
+            return
+        
+        duration_seconds = parse_duration(time_str)
+        if duration_seconds is None:
+            print(f"[red]Invalid duration format: {time_str}[/]")
+            return
+        
+        # Save duration to task
+        task.time_duration = duration_seconds
+        save_tasks(all_tasks)
+        print(f"[green]Duration set to: {task.get_duration_str()}[/]")
+    
+    # Launch deep work GUI
+    print(f"[bold green]🚀 Launching deep work mode...[/]")
+    
+    gif_path = "f:/App/Anti-gravity/CLI TDL/ascii-animation.gif"
+    
+    try:
+        from deep_work import start_deep_work
+        task_completed, task_dismissed, saved_remaining = start_deep_work(task.title, duration_seconds, gif_path)
+        
+        # Mark task complete if user chose to complete it
+        if task_completed:
+            task.completed = True
+            save_tasks(all_tasks)
+            print(f"[bold green]✓ Task '{task.title}' completed![/]")
+        elif task_dismissed:
+            print(f"[yellow]Deep work session dismissed.[/]")
+        elif saved_remaining is not None:
+            # Update task duration with remaining time
+            task.time_duration = saved_remaining
+            save_tasks(all_tasks)
+            print(f"[cyan]Progress saved! Remaining time: {task.get_duration_str()}[/]")
+        else:
+            print(f"[yellow]Deep work session ended.[/]")
+        
+    except Exception as e:
+        print(f"[red]Error launching deep work mode: {e}[/]")
+
+
+# --- GOAL CHECKLIST FEATURE ---
+
+def get_goal_by_display_id(display_id: int):
+    """Helper to get a goal by its display ID (1-based index)."""
+    goals = load_goals()
+    # Sort same as display: Incomplete first, then by creation date
+    sorted_goals = sorted(goals, key=lambda g: (g.completed, g.created_date))
+    
+    if 1 <= display_id <= len(sorted_goals):
+        return sorted_goals[display_id - 1], goals
+    return None, goals
+
+@app.command(name="goal")
+def goal_view():
+    """View the Goal Checklist notebook."""
+    goals = load_goals()
+    ui.render_goals(goals)
+
+@app.command(name="goaladd")
+def goal_add(
+    name: List[str] = typer.Argument(..., help="The goal description")
+):
+    """Add a new goal to the checklist."""
+    title = " ".join(name)
+    goals = load_goals()
+    
+    new_goal = Goal(title=title)
+    goals.append(new_goal)
+    save_goals(goals)
+    
+    print(f"[bold green]Goal added![/] 🎯 [dim]{new_goal.title}[/]")
+
+@app.command(name="goalcheck")
+def goal_check(
+    goal_id: int = typer.Argument(..., help="Goal display ID to check/uncheck")
+):
+    """Toggle completion status of a goal."""
+    goal, all_goals = get_goal_by_display_id(goal_id)
+    
+    if not goal:
+        print(f"[red]Goal ID {goal_id} not found.[/]")
+        return
+        
+    # Toggle status
+    goal.completed = not goal.completed
+    if goal.completed:
+        goal.completed_date = datetime.now()
+        print(f"[bold green]Goal checked![/] ✓ [dim]{goal.title}[/]")
+    else:
+        goal.completed_date = None
+        print(f"[bold yellow]Goal unchecked.[/] [dim]{goal.title}[/]")
+        
+    save_goals(all_goals)
+
+@app.command(name="goaldel")
+def goal_del(
+    goal_id: int = typer.Argument(..., help="Goal display ID to delete")
+):
+    """Delete a goal."""
+    # ... existing implementation
+
+@app.command(name="dump")
+def dump(
+    content: List[str] = typer.Argument(None, help="The note content (optional). If empty, shows all notes.")
+):
+    """Quickly dump a note or view all notes."""
+    notes = load_notes()
+    
+    # If no content provided, show notes
+    if not content:
+        ui.render_notes(notes)
+        return
+        
+    # Combined content
+    
+    # Check if user meant "dump del <ids>"
+    if len(content) >= 2 and content[0].lower() == "del":
+        # Pass the rest of the arguments as a single string (e.g., "1,2,3" or "1 2 3")
+        # Handle cases like "del 1,2" (len=2, content[1]="1,2") or "del 1 2" (len=3)
+        ids_str = "".join(content[1:])
+        dump_del(ids_str)
+        return
+
+    # Combine content into one string
+    text = " ".join(content)
+    
+    new_note = Note(content=text)
+    notes.append(new_note)
+    save_notes(notes)
+    
+    print(f"[bold green]Note dumped![/] 🧠 [dim]#{new_note.id}[/]")
+
+@app.command(name="dump_del")
+def dump_del(
+    note_ids_str: str = typer.Argument(..., help="Note ID(s) to delete (comma separated, e.g., 1,2,3)")
+):
+    """Delete note(s) by ID (supports multiple like 1,2,3)."""
+    notes = load_notes()
+    
+    # Parse IDs
+    try:
+        # Handle commas and spaces
+        cleaned = note_ids_str.replace(",", " ")
+        target_ids = [int(x) for x in cleaned.split() if x.isdigit()]
+    except ValueError:
+        print("[red]Invalid format. Use IDs like 1,2,3[/]")
+        return
+
+    if not target_ids:
+        print("[red]No valid IDs found.[/]")
+        return
+        
+    # Find matching notes
+    to_delete = [n for n in notes if n.id in target_ids]
+    
+    if not to_delete:
+        print(f"[red]No notes found with IDs: {target_ids}[/]")
+        return
+        
+    confirm = questionary.confirm(
+        f"Delete {len(to_delete)} note(s)? (IDs: {', '.join(map(str, target_ids))})",
+        default=False
+    ).ask()
+    
+    if confirm:
+        for note in to_delete:
+            notes.remove(note)
+        save_notes(notes)
+        print(f"[bold red]{len(to_delete)} note(s) deleted![/] 🗑️")
+    else:
+        print("[yellow]Deletion cancelled.[/]")
+
+@app.command(name="goaldel")
+def goal_del(
+    goal_id: int = typer.Argument(..., help="Goal display ID to delete")
+):
+    """Delete a goal."""
+    goal, all_goals = get_goal_by_display_id(goal_id)
+    
+    if not goal:
+        print(f"[red]Goal ID {goal_id} not found.[/]")
+        return
+        
+    confirm = questionary.confirm(
+        f"Delete goal '{goal.title}'?",
+        default=False
+    ).ask()
+    
+    if confirm:
+        # We need to remove the exact goal instance from all_goals list
+        # Since 'goal' ref came from a sorted list, we need to find it in all_goals by ID
+        target = next((g for g in all_goals if g.id == goal.id), None)
+        if target:
+            all_goals.remove(target)
+            save_goals(all_goals)
+            print(f"[bold red]Goal deleted![/] 🗑️")
+    else:
+        print("[yellow]Deletion cancelled.[/]")
+
+
+
+@app.command(name="welcome")
+def welcome():
+    """Show welcome screen with available commands."""
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.columns import Columns
+    from rich.console import Console
+    
+    console = Console()
+    
+    # ASCII Art Title with rainbow gradient
+    title_lines = [
+        "████████╗██████╗ ██╗         ███╗   ███╗ █████╗ ███╗   ██╗ █████╗  ██████╗ ███████╗██████╗ ",
+        "╚══██╔══╝██╔══██╗██║         ████╗ ████║██╔══██╗████╗  ██║██╔══██╗██╔════╝ ██╔════╝██╔══██╗",
+        "   ██║   ██║  ██║██║         ██╔████╔██║███████║██╔██╗ ██║███████║██║  ███╗█████╗  ██████╔╝",
+        "   ██║   ██║  ██║██║         ██║╚██╔╝██║██╔══██║██║╚██╗██║██╔══██║██║   ██║██╔══╝  ██╔══██╗",
+        "   ██║   ██████╔╝███████╗    ██║ ╚═╝ ██║██║  ██║██║ ╚████║██║  ██║╚██████╔╝███████╗██║  ██║",
+        "   ╚═╝   ╚═════╝ ╚══════╝    ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝"
+    ]
+    
+    # Theme-based colors for each line
+    theme = ui.get_current_theme()
+    rainbow_colors = theme["rainbow_colors"]
+    
+    # Streak Display (Compact & Right Aligned)
+    from streak_storage import get_streak_display
+    console.print(Align.right(get_streak_display() + " "), style="bold")
+    
+    for i, line in enumerate(title_lines):
+        console.print(line, style=f"bold {rainbow_colors[i % len(rainbow_colors)]}")
+    console.print()
+    
+    # Welcome message with theme gradient
+    welcome_text = Text()
+    welcome_text.append("✨ ", style=f"bold {theme['warning']}")
+    welcome_text.append("Welcome to ", style="bold white")
+    welcome_text.append("T", style=f"bold {theme['primary']}")
+    welcome_text.append("D", style=f"bold {theme['secondary']}")
+    welcome_text.append("L", style=f"bold {theme['success']}")
+    welcome_text.append(" - Your ", style="bold white")
+    welcome_text.append(f"{get_theme().capitalize()}", style=f"bold {theme['secondary']}")
+    welcome_text.append(" Terminal Task Manager! ", style="bold white")
+    welcome_text.append("✨", style=f"bold {theme['warning']}")
+    console.print(Panel(welcome_text, style=f"bold {theme['secondary']}", padding=(1, 2)))
+    console.print()
+    
+    # Commands organized by category
+    task_commands = Panel(
+        f"[bold {theme['error']}]Task Management[/]\n\n"
+        f"[{theme['success']}]TDL db[/]              - View all tasks\n"
+        f"[{theme['success']}]TDL add[/]             - Add new task\n"
+        f"[{theme['success']}]TDL <ID> -d/-c/-t[/]   - Update task\n"
+        f"[{theme['success']}]TDL del <ID>[/]        - Delete task\n"
+        f"[{theme['success']}]TDL check[/]           - Mark tasks complete\n"
+        f"[{theme['success']}]TDL info <ID>[/]       - View task details",
+        title=f"[bold {theme['error']}]📝 Tasks[/]",
+        border_style=theme["error"],
+        padding=(1, 2)
+    )
+    
+    focus_commands = Panel(
+        "[bold orange1]Deep Work[/]\n\n"
+        f"[{theme['success']}]TDL work <ID>[/]      - Start deep work session\n"
+        "[dim]  • Timer with GIF animation[/]\n"
+        "[dim]  • Press SPACE to pause[/]\n"
+        "[dim]  • Extend or complete after[/]\n\n",
+        title="[bold orange1]⏱ Focus[/]",
+        border_style="orange1",
+        padding=(1, 2)
+    )
+    
+    org_commands = Panel(
+        f"[bold {theme['success']}]Organization[/]\n\n"
+        f"[{theme['success']}]TDL add cat <name>[/] - Add category\n"
+        f"[{theme['success']}]TDL cat[/]            - List categories\n"
+        f"[{theme['success']}]TDL clear[/]          - Archive done\n"
+        f"[{theme['success']}]TDL clear-all[/]      - Delete ALL (!)\n"
+        f"[{theme['success']}]TDL hist[/]           - View history\n",
+        title=f"[bold {theme['success']}]🗂 Organize[/]",
+        border_style=theme["success"],
+        padding=(1, 2)
+    )
+
+    filter_commands = Panel(
+        f"[bold {theme['primary']}]Time Filters[/]\n\n"
+        f"[{theme['success']}]TDL today[/]          - Due today\n"
+        f"[{theme['success']}]TDL tomorrow[/]       - Due tomorrow\n"
+        f"[{theme['success']}]TDL this-week[/]     - Due this week\n"
+        f"[{theme['success']}]TDL this-month[/]    - Due this month\n"
+        f"[{theme['success']}]TDL rc[/]             - Recurring tasks\n",
+        title=f"[bold {theme['primary']}]📅 Filter[/]",
+        border_style=theme["primary"],
+        padding=(1, 2)
+    )
+
+    
+    # Display in columns (2x2 grid)
+    console.print(Columns([task_commands, focus_commands], equal=True, expand=True))
+    console.print(Columns([org_commands, filter_commands], equal=True, expand=True))
+    console.print()
+    
+    # Quick tips
+    tips = Panel(
+        f"[bold {theme['secondary']}]💡 Quick Tips:[/]\n\n"
+        f"• Use [{theme['error']}]-f 1[/] for important, [dim]-f -1[/] unimportant\n"
+        "• Set duration: [orange1]-t 2h30m[/]\n"
+        f"• Relative dates: [{theme['success']}]today[/], [{theme['success']}]tomorrow[/]\n"
+        f"• Type [{theme['primary']}]TDL <ID>[/] to update tasks",
+        title=f"[bold {theme['secondary']}]✨ Tips[/]",
+        border_style=theme["secondary"],
+        padding=(1, 2)
+    )
+    console.print(tips)
+    console.print()
+    
+    # Theme footer
+    footer_text = Text()
+    footer_words = ["✨", "Type", "TDL", "db", "to", "view", "your", "tasks", "✨"]
+    footer_colors = theme["rainbow_colors"]
+    
+    for i, word in enumerate(footer_words):
+        if word == "TDL" or word == "db":
+            footer_text.append(word, style=f"bold {footer_colors[i % len(footer_colors)]}")
+        else:
+            footer_text.append(word, style=footer_colors[i % len(footer_colors)])
+        footer_text.append(" ")
+    
+    console.print(Align.center(footer_text))
+    console.print()
+    
+    # Quick Navigation
+    console.print(f"[dim]Quick Navigation:[/dim]")
+    console.print(f"[bold {theme['primary']}]0[/] Today  [bold {theme['primary']}]1[/] Dashboard  [bold {theme['primary']}]2[/] Goals  [bold {theme['primary']}]3[/] Categories  [bold {theme['primary']}]4[/] History  [bold {theme['primary']}]5[/] Calendar")
+    
+    try:
+        # We need a small delay or loop to separate this from the command exit if run as command
+        # But 'welcome' is a command, so we can just ask.
+        choice = questionary.text("Select option or enter command:", qmark="?").ask()
+        
+        if not choice:
+            return
+            
+        if choice == '0':
+            today()
+        elif choice == '1':
+            dashboard()
+        elif choice == '2':
+            goal_view()
+        elif choice == '3':
+            categories()
+        elif choice == '4':
+            hist()
+        elif choice == '5':
+            calendar()
+        else:
+            # Execute as arbitrary TDL command
+            import subprocess
+            import shlex
+            import sys
+            
+            try:
+                # Split command respecting quotes
+                args = shlex.split(choice)
+                
+                # Construct command: python main.py <args>
+                cmd = [sys.executable, sys.argv[0]] + args
+                
+                print(f"[dim]Running: TDL {choice}[/dim]")
+                subprocess.run(cmd)
+            except Exception as e:
+                print(f"[red]Error executing command: {e}[/]")
+                
+    except KeyboardInterrupt:
+        pass
+
+@app.command(name="intro")
+def intro():
+    """Show introduction, usage, features, and motivation behind TDL."""
+    from rich.panel import Panel
+    from rich.table import Table
+    from rich.console import Group
+    from rich.text import Text
+    from rich import box
+    from rich.align import Align
+    
+    theme = ui.get_current_theme()
+    
+    # -- Header Section --
+    header = Text()
+    header.append("🚀 Welcome to TDL (Terminal Task Manager)\n\n", style=f"bold {theme['primary']}")
+    header.append("🎯 What is TDL?\n", style=f"bold {theme['secondary']}")
+    header.append("TDL is a lightning-fast, keyboard-centric task manager built specifically for the command line interface. It is designed to be lightweight, beautiful, and highly efficient, keeping you laser-focused on what truly matters. By eliminating the bloat of traditional GUI applications, TDL ensures that managing your tasks feels like a natural extension of your terminal workflow.\n", style="white")
+    
+    # -- Motivation Section --
+    motivation_text = (
+        "I was struggling with keeping track of my work, constantly switching between heavy applications that slowed down my workflow. "
+        "I wanted something that could handle time management effectively directly on my laptop, "
+        "without any lag or distractions. TDL was born out of the need for a tool that is as fast as thought, "
+        "providing a smooth, efficient, and visually pleasing experience for developers and power users."
+    )
+    motivation_panel = Panel(
+        Text(motivation_text, style="italic white"),
+        title=f"[bold {theme['warning']}]💡 Why TDL?[/]",
+        border_style=theme["secondary"],
+        padding=(1, 2)
+    )
+
+    # -- Features Section (Table) --
+    feature_table = Table(box=None, expand=True, show_header=False, padding=(0, 2))
+    feature_table.add_column("Icon", style="bold", width=4)
+    feature_table.add_column("Description", style="white")
+    
+    features = [
+        ("🌈", f"[bold {theme['rainbow_colors'][0]}]Rainbow Dashboard[/]: Visualize all your tasks at a glance with a vibrant, auto-organized dashboard that groups items by timeline (Today, Tomorrow, Upcoming)."),
+        ("🔁", f"[bold {theme['rainbow_colors'][1]}]Recurrent Tasks[/]: Automate your routine. Easily configure tasks to repeat daily, weekly, on specific weekdays, or on custom schedules so you never miss a beat."),
+        ("⏱️", f"[bold {theme['rainbow_colors'][2]}]Deep Work Mode[/]: Enter a distraction-free zone for single-tasking. Features a dedicated timer, visual progress bar, and completion tracking to boost your productivity."),
+        ("🗂️", f"[bold {theme['rainbow_colors'][3]}]Advanced Organization[/]: Keep everything structured with custom categories, comprehensive history tracking, and a dedicated goal setting notebook."),
+        ("⚡", f"[bold {theme['rainbow_colors'][4]}]Blazing Speed[/]: Built for instant startup and immediate command execution. No loading screens, no waiting—just efficiency.")
+    ]
+    
+    for icon, desc in features:
+        feature_table.add_row(icon, desc)
+        import time 
+        # Adding a small row for spacing
+        feature_table.add_row("", "")
+
+    # -- Usage Section (Table) --
+    usage_table = Table(box=None, expand=True, show_header=False, padding=(0, 2))
+    usage_table.add_column("Command", style=f"bold {theme['success']}", width=25)
+    usage_table.add_column("Action", style="dim white")
+    
+    commands = [
+        ("TDL db", "View your main Dashboard"),
+        ("TDL add \"Task Name\"", "Quickly add a new task"),
+        ("TDL add \"Task\" -r", "Add a recurring task (interactive setup)"),
+        ("TDL work <ID>", "Start a Deep Work focus session"),
+        ("TDL check", "Open the interactive checklist to complete tasks"),
+        ("TDL rc", "Manage your recurring tasks"),
+        ("TDL info <ID>", "View detailed task information")
+    ]
+    
+    for cmd, act in commands:
+        usage_table.add_row(cmd, act)
+
+    # -- Assemble Content --
+    content_group = Group(
+        header,
+        Text("\n"),
+        motivation_panel,
+        Text("\n✨ Key Features\n", style=f"bold {theme['warning']}"),
+        feature_table,
+        Text("\n⌨️  Quick Usage Guide\n", style=f"bold {theme['primary']}"),
+        usage_table
+    )
+    
+    console.print()
+    console.print(Panel(
+        content_group,
+        title=f"[bold {theme['primary']}]About TDL[/]",
+        border_style=theme["secondary"],
+        padding=(1, 2),
+        box=box.ROUNDED,
+        expand=False # Disable expand to avoid forcing width calculation issues
+    ))
+    console.print()
+
+@app.command(name="settings")
+@app.command(name="st", hidden=True)
+def settings():
+    """Configure TDL settings and view information."""
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.console import Console
+    
+    console = Console()
+    
+    while True:
+        # Clear screen for a clean menu
+        import os
+        os.system('cls' if os.name == 'nt' else 'clear')
+        
+        theme = ui.get_current_theme()
+        
+        # Settings Header
+        header = Text()
+        header.append("⚙️  SETTINGS", style=f"bold {theme['primary']}")
+        console.print(Panel(header, border_style=theme["primary"], padding=(0, 2)))
+        console.print()
+        
+        choices = [
+            "🎨 Change Theme",
+            "📖 View Manual",
+            "🗑️  Reset All Data",
+            "ℹ️  About Developer",
+            "🚪 Exit Settings"
+        ]
+        
+        action = questionary.select(
+            "Select an option:",
+            choices=choices,
+            style=questionary.Style([
+                ('pointer', f'fg:{theme["primary"]} bold'),
+                ('highlighted', f'fg:{theme["primary"]} bold'),
+                ('selected', 'fg:white'),
+            ])
+        ).ask()
+        
+        if not action or "Exit" in action:
+            break
+            
+        if "Change Theme" in action:
+            theme_choices = ["Rainbow", "Dark", "Neon", "Pastel"]
+            current = get_theme().capitalize()
+            
+            new_theme = questionary.select(
+                "Choose a theme:",
+                choices=theme_choices,
+                default=current
+            ).ask()
+            
+            if new_theme:
+                config = load_config()
+                config["theme"] = new_theme.lower()
+                save_config(config)
+                print(f"[bold green]Theme updated to {new_theme}![/]")
+                import time
+                time.sleep(1)
+        
+        elif "View Manual" in action:
+            welcome()
+            print("\n[dim]Press Enter to return to settings...[/dim]")
+            input()
+            
+        elif "Reset All Data" in action:
+            clear_all()
+            print("\n[dim]Press Enter to return to settings...[/dim]")
+            input()
+            
+        elif "About" in action:
+            dev_info = Text()
+            dev_info.append("Developer: ", style=f"bold {theme['primary']}")
+            dev_info.append("LucasDoCoding\n", style="white")
+            dev_info.append("Contact:   ", style=f"bold {theme['primary']}")
+            dev_info.append("huylostnickagain@gmail.com\n", style="white")
+            dev_info.append("\nThank you for using TDL! 🚀", style="italic")
+            
+            panel = Panel(
+                dev_info,
+                title="[bold white]Developer Information[/bold white]",
+                border_style=theme["secondary"],
+                padding=(1, 2)
+            )
+            console.print(panel)
+            print("\n[dim]Press Enter to return to settings...[/dim]")
+            input()
+
+
+
+
+
+if __name__ == "__main__":
+    import sys
+    # If no arguments provided, show welcome screen
+    if len(sys.argv) == 1:
+        sys.argv.append("welcome")
+    
+    # Handle shortcut: if first arg is a digit, insert 'update' command
+    elif sys.argv[1].isdigit():
+        sys.argv.insert(1, "update")
+        
+    # Handle 'add cat' shortcut
+    elif len(sys.argv) >= 3 and sys.argv[1] == "add" and sys.argv[2] == "cat":
+        sys.argv[1] = "addcat"
+        sys.argv.pop(2)
+        
+    # Handle 'goal' shortcuts
+    elif len(sys.argv) >= 2 and sys.argv[1] == "goal":
+        # TDL goal add ...
+        if len(sys.argv) >= 3:
+            sub = sys.argv[2]
+            if sub == "add":
+                sys.argv[1] = "goaladd"
+                sys.argv.pop(2)
+            elif sub == "check":
+                sys.argv[1] = "goalcheck"
+                sys.argv.pop(2)
+            elif sub == "del":
+                sys.argv[1] = "goaldel"
+                sys.argv.pop(2)
+    
+    # Handle 'rc del' shortcut
+    elif len(sys.argv) >= 3 and sys.argv[1] == "rc" and sys.argv[2] == "del":
+        sys.argv[1] = "rcdel"
+        sys.argv.pop(2)
+        
+    # Handle '?' shortcut for intro
+    elif len(sys.argv) > 1 and sys.argv[1] == "?":
+        sys.argv[1] = "intro"
+    
+    app()
