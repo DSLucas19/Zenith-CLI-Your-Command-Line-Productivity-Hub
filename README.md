@@ -74,6 +74,7 @@ Designed to be "fast as thought", Zenith CLI ensures you spend less time managin
 | `TDL goals` | | Open the Goals notebook. |
 | `TDL cat` | | Manage categories. |
 | `TDL ?` | `intro` | Detailed introduction and features. |
+| `TDL` | `welcome` | The main welcome tab of the app |
 
 ---
 
@@ -90,3 +91,4 @@ Designed to be "fast as thought", Zenith CLI ensures you spend less time managin
 <div align="center">
 Built with ❤️ for the Command Line.
 </div>
+
