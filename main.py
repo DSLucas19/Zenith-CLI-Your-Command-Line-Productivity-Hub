@@ -8,12 +8,13 @@ from datetime import datetime
 import questionary
 from dateutil import parser as date_parser
 
-from models import Task, Goal
+from models import Task, Goal, Template
 from storage import load_tasks, save_tasks
 from goals_storage import load_goals, save_goals
 from categories_storage import load_categories, save_categories
 from history_storage import load_history, add_to_history, save_history
 from notes_storage import load_notes, save_notes, Note
+from templates_storage import load_templates, save_templates, get_template_by_alias
 import ui
 from rich.align import Align
 from config_storage import load_config, save_config, get_theme
@@ -123,6 +124,37 @@ def add(
 ):
     """Add a new task rapidly."""
     interactive = False
+    template_loaded = None
+    
+    # Check if title starts with * (template alias)
+    if title and title.startswith("*"):
+        alias = title[1:]  # Remove the * prefix
+        template_loaded = get_template_by_alias(alias)
+        
+        if not template_loaded:
+            print(f"[red]Template '{alias}' not found. Use 'TDL template' to view available templates.[/]")
+            return
+        
+        # Load template defaults (can be overridden by flags)
+        print(f"[cyan]Loading template: {alias}[/]")
+        title = template_loaded.title
+        
+        # Only use template values if not explicitly provided via flags
+        if category is None and template_loaded.category:
+            category = ",".join(template_loaded.category) if isinstance(template_loaded.category, list) else template_loaded.category
+        
+        if due is None and template_loaded.due_date_offset:
+            due = template_loaded.due_date_offset
+        
+        if time is None and template_loaded.time_duration:
+            time = None  # Will use template_loaded.time_duration directly later
+        
+        if flag is None:
+            flag = template_loaded.priority
+        
+        if not rc:
+            rc = template_loaded.recurrent
+    
     if not title:
         interactive = True
         title = questionary.text("Task:").ask()
@@ -176,6 +208,9 @@ def add(
         if duration_seconds is None:
             print(f"[red]Invalid duration format: {time}. Use format like '2h30m15s'[/]")
             return
+    elif template_loaded and template_loaded.time_duration:
+        # Use template duration if no explicit time provided
+        duration_seconds = template_loaded.time_duration
             
     # Set priority from flag
     priority = 0
@@ -195,6 +230,11 @@ def add(
         if recurrence_type is None:
             print("[yellow]Recurrence setup cancelled.[/]")
             rc = False
+    elif template_loaded and template_loaded.recurrent:
+        # Load template recurrence settings if no explicit -r flag
+        recurrence_type = template_loaded.recurrence_type
+        recurrence_days = template_loaded.recurrence_days
+        recurrence_interval = template_loaded.recurrence_interval
     
     tasks = load_tasks()
     new_task = Task(
@@ -442,16 +482,24 @@ def check():
 
     if selected_ids:
         count = 0
+        completion_time = datetime.now()
         for t in tasks:
             if t.id in selected_ids:
                 t.completed = True
+                t.completed_at = completion_time  # NEW: track completion time
                 count += 1
         save_tasks(tasks)
         
         # Update streak
         from streak_storage import update_streak, get_streak_display
+        from config_storage import get_show_streak
+        
         streak, active = update_streak()
-        print(f"[bold green]Completed {count} tasks![/] {get_streak_display()}")
+        
+        if get_show_streak():
+            print(f"[bold green]Completed {count} tasks![/] {get_streak_display()}")
+        else:
+            print(f"[bold green]Completed {count} tasks![/]")
     else:
         print("[yellow]No tasks completed.[/]")
 
@@ -806,10 +854,9 @@ def clear_all():
     
     confirm2 = questionary.text(
         "Type 'DELETE EVERYTHING' to confirm:",
-        validate=lambda text: text == "DELETE EVERYTHING"
     ).ask()
     
-    if confirm2 != "DELETE EVERYTHING":
+    if not confirm2 or confirm2 != "DELETE EVERYTHING":
         print("[green]Operation cancelled. Nothing was deleted.[/]")
         return
     
@@ -836,6 +883,10 @@ def clear_all():
         # Clear notes
         if os.path.exists("notes.json"):
             save_notes([])
+        
+        # Clear streak data
+        if os.path.exists("streak.json"):
+            os.remove("streak.json")
 
         print("[bold green]✓ All data deleted successfully![/]")
         print("[dim]Your TDL is now completely clean.[/dim]")
@@ -1176,6 +1227,171 @@ def goal_del(
 
 
 
+# --- TEMPLATE SYSTEM ---
+
+@app.command(name="template")
+def template_cmd(
+    title: List[str] = typer.Argument(None, help="Template title (leave empty to list templates)"),
+    alias: Optional[str] = typer.Option(None, "-a", help="Alias/shortname for the template"),
+    category: Optional[str] = typer.Option(None, "-c", help="Category for the template"),
+    due: Optional[str] = typer.Option(None, "-d", help="Due date offset (e.g. 'today', 'tomorrow', '+2d')"),
+    time: Optional[str] = typer.Option(None, "-t", help="Time duration (e.g. '2h30m', '45m')"),
+    flag: Optional[int] = typer.Option(None, "-f", "--flag", help="Set priority: -1=unimportant, 0=normal, 1=important"),
+    rc: bool = typer.Option(False, "-r", "--rc", help="Make this a recurring template")
+):
+    """Create a new task template or list all templates."""
+    templates = load_templates()
+    
+    # If no title provided, list all templates
+    if not title:
+        if not templates:
+            print("[yellow]No templates found. Create one with 'TDL template <title> -a <alias>'[/]")
+            return
+        
+        console.print("\n[bold magenta]📋 TASK TEMPLATES[/bold magenta]\n")
+        
+        table = Table(box=box.ROUNDED, show_header=True, header_style="bold magenta")
+        table.add_column("Alias", width=15, style="bold cyan")
+        table.add_column("Title", style="white")
+        table.add_column("Category", style="yellow")
+        table.add_column("Due", style="green")
+        table.add_column("Duration", style="blue")
+        table.add_column("Priority", style="red")
+        
+        for template in templates:
+            cat_str = ", ".join(template.category) if template.category else "-"
+            due_str = template.due_date_offset or "-"
+            
+            # Format duration
+            if template.time_duration:
+                hours = template.time_duration // 3600
+                minutes = (template.time_duration % 3600) // 60
+                parts = []
+                if hours > 0:
+                    parts.append(f"{hours}h")
+                if minutes > 0:
+                    parts.append(f"{minutes}m")
+                duration_str = "".join(parts) if parts else "-"
+            else:
+                duration_str = "-"
+            
+            priority_names = {-1: "Low", 0: "Normal", 1: "HIGH"}
+            priority_str = priority_names.get(template.priority, "Normal")
+            if template.recurrent:
+                priority_str += " 🔁"
+            
+            table.add_row(
+                f"*{template.alias}",
+                template.title,
+                cat_str,
+                due_str,
+                duration_str,
+                priority_str
+            )
+        
+        console.print(table)
+        console.print(f"\n[dim]Use with: TDL add *alias[/dim]")
+        console.print(f"[dim]Example: TDL add *{templates[0].alias if templates else 'workout'}[/dim]\n")
+        return
+    
+    # Create new template
+    if not alias:
+        print("[red]Alias is required. Use -a flag to set an alias.[/]")
+        print("[dim]Example: TDL template 'Daily Standup' -a standup -d today -t 15m[/dim]")
+        return
+    
+    # Check if alias already exists
+    existing = get_template_by_alias(alias)
+    if existing:
+        print(f"[red]Template with alias '{alias}' already exists. Delete it first or use a different alias.[/]")
+        return
+    
+    template_title = " ".join(title)
+    
+    # Parse categories
+    parsed_categories = None
+    if category:
+        categories_list = [c.strip().capitalize() for c in category.split(',') if c.strip()]
+        parsed_categories = categories_list if categories_list else None
+    
+    # Parse time duration
+    duration_seconds = None
+    if time:
+        duration_seconds = parse_duration(time)
+        if duration_seconds is None:
+            print(f"[red]Invalid duration format: {time}. Use format like '2h30m15s'[/]")
+            return
+    
+    # Set priority
+    priority = 0
+    if flag is not None:
+        if flag not in [-1, 0, 1]:
+            print(f"[red]Invalid priority: {flag}. Use -1 (unimportant), 0 (normal), or 1 (important)[/]")
+            return
+        priority = flag
+    
+    # Handle recurrence
+    recurrence_type = None
+    recurrence_days = None
+    recurrence_interval = 1
+    
+    if rc:
+        recurrence_type, recurrence_days, recurrence_interval = configure_recurrence()
+        if recurrence_type is None:
+            print("[yellow]Recurrence setup cancelled.[/]")
+            rc = False
+    
+    # Create template
+    new_template = Template(
+        alias=alias,
+        title=template_title,
+        category=parsed_categories,
+        due_date_offset=due,
+        time_duration=duration_seconds,
+        priority=priority,
+        recurrent=rc,
+        recurrence_type=recurrence_type,
+        recurrence_days=recurrence_days,
+        recurrence_interval=recurrence_interval
+    )
+    
+    templates.append(new_template)
+    save_templates(templates)
+    
+    print(f"[bold green]Template created![/] ✓")
+    print(f"[cyan]Alias:[/] *{alias}")
+    print(f"[dim]Use with: TDL add *{alias}[/dim]")
+
+@app.command(name="templatedel")
+def template_del(
+    alias: str = typer.Argument(..., help="Template alias to delete")
+):
+    """Delete a template by its alias."""
+    templates = load_templates()
+    
+    # Remove * prefix if provided
+    if alias.startswith("*"):
+        alias = alias[1:]
+    
+    template = get_template_by_alias(alias)
+    
+    if not template:
+        print(f"[red]Template '{alias}' not found.[/]")
+        return
+    
+    confirm = questionary.confirm(
+        f"Delete template '*{alias}' ({template.title})?",
+        default=False
+    ).ask()
+    
+    if confirm:
+        templates = [t for t in templates if t.alias.lower() != alias.lower()]
+        save_templates(templates)
+        print(f"[bold red]Template '*{alias}' deleted![/] 🗑️")
+    else:
+        print("[yellow]Deletion cancelled.[/]")
+
+
 @app.command(name="welcome")
 def welcome():
     """Show welcome screen with available commands."""
@@ -1202,7 +1418,10 @@ def welcome():
     
     # Streak Display (Compact & Right Aligned)
     from streak_storage import get_streak_display
-    console.print(Align.right(get_streak_display() + " "), style="bold")
+    from config_storage import get_show_streak
+    
+    if get_show_streak():
+        console.print(Align.right(get_streak_display() + " "), style="bold")
     
     for i, line in enumerate(title_lines):
         console.print(line, style=f"bold {rainbow_colors[i % len(rainbow_colors)]}")
@@ -1227,6 +1446,7 @@ def welcome():
         f"[bold {theme['error']}]Task Management[/]\n\n"
         f"[{theme['success']}]TDL db[/]              - View all tasks\n"
         f"[{theme['success']}]TDL add[/]             - Add new task\n"
+        f"[{theme['success']}]TDL add ... -r[/]      - Add recurring task\n"
         f"[{theme['success']}]TDL <ID> -d/-c/-t[/]   - Update task\n"
         f"[{theme['success']}]TDL del <ID>[/]        - Delete task\n"
         f"[{theme['success']}]TDL check[/]           - Mark tasks complete\n"
@@ -1248,25 +1468,27 @@ def welcome():
     )
     
     org_commands = Panel(
-        f"[bold {theme['success']}]Organization[/]\n\n"
+        f"[bold {theme['success']}]Organization & Stats[/]\n\n"
         f"[{theme['success']}]TDL add cat <name>[/] - Add category\n"
         f"[{theme['success']}]TDL cat[/]            - List categories\n"
+        f"[{theme['success']}]TDL stat[/]           - View statistics\n"
+        f"[{theme['success']}]TDL settings[/]       - App settings\n"
         f"[{theme['success']}]TDL clear[/]          - Archive done\n"
-        f"[{theme['success']}]TDL clear-all[/]      - Delete ALL (!)\n"
-        f"[{theme['success']}]TDL hist[/]           - View history\n",
+        f"[{theme['success']}]TDL hist[/]           - View history",
         title=f"[bold {theme['success']}]🗂 Organize[/]",
         border_style=theme["success"],
         padding=(1, 2)
     )
 
     filter_commands = Panel(
-        f"[bold {theme['primary']}]Time Filters[/]\n\n"
+        f"[bold {theme['primary']}]Views & Filters[/]\n\n"
+        f"[{theme['success']}]TDL calendar[/]       - Interactive Calendar\n"
+        f"[{theme['success']}]TDL rc[/]             - Recurring tasks\n"
         f"[{theme['success']}]TDL today[/]          - Due today\n"
         f"[{theme['success']}]TDL tomorrow[/]       - Due tomorrow\n"
         f"[{theme['success']}]TDL this-week[/]     - Due this week\n"
-        f"[{theme['success']}]TDL this-month[/]    - Due this month\n"
-        f"[{theme['success']}]TDL rc[/]             - Recurring tasks\n",
-        title=f"[bold {theme['primary']}]📅 Filter[/]",
+        f"[{theme['success']}]TDL this-month[/]    - Due this month",
+        title=f"[bold {theme['primary']}]📅 Views[/]",
         border_style=theme["primary"],
         padding=(1, 2)
     )
@@ -1305,51 +1527,6 @@ def welcome():
     
     console.print(Align.center(footer_text))
     console.print()
-    
-    # Quick Navigation
-    console.print(f"[dim]Quick Navigation:[/dim]")
-    console.print(f"[bold {theme['primary']}]0[/] Today  [bold {theme['primary']}]1[/] Dashboard  [bold {theme['primary']}]2[/] Goals  [bold {theme['primary']}]3[/] Categories  [bold {theme['primary']}]4[/] History  [bold {theme['primary']}]5[/] Calendar")
-    
-    try:
-        # We need a small delay or loop to separate this from the command exit if run as command
-        # But 'welcome' is a command, so we can just ask.
-        choice = questionary.text("Select option or enter command:", qmark="?").ask()
-        
-        if not choice:
-            return
-            
-        if choice == '0':
-            today()
-        elif choice == '1':
-            dashboard()
-        elif choice == '2':
-            goal_view()
-        elif choice == '3':
-            categories()
-        elif choice == '4':
-            hist()
-        elif choice == '5':
-            calendar()
-        else:
-            # Execute as arbitrary TDL command
-            import subprocess
-            import shlex
-            import sys
-            
-            try:
-                # Split command respecting quotes
-                args = shlex.split(choice)
-                
-                # Construct command: python main.py <args>
-                cmd = [sys.executable, sys.argv[0]] + args
-                
-                print(f"[dim]Running: TDL {choice}[/dim]")
-                subprocess.run(cmd)
-            except Exception as e:
-                print(f"[red]Error executing command: {e}[/]")
-                
-    except KeyboardInterrupt:
-        pass
 
 @app.command(name="intro")
 def intro():
@@ -1442,6 +1619,12 @@ def intro():
     ))
     console.print()
 
+@app.command(name="stat")
+def statistics():
+    """Display task completion statistics."""
+    from stat_command import stat
+    stat()
+
 @app.command(name="settings")
 @app.command(name="st", hidden=True)
 def settings():
@@ -1467,7 +1650,8 @@ def settings():
         
         choices = [
             "🎨 Change Theme",
-            "📖 View Manual",
+            "� Toggle Streak Display",
+            "�📖 View Manual",
             "🗑️  Reset All Data",
             "ℹ️  About Developer",
             "🚪 Exit Settings"
@@ -1501,6 +1685,23 @@ def settings():
                 config["theme"] = new_theme.lower()
                 save_config(config)
                 print(f"[bold green]Theme updated to {new_theme}![/]")
+                import time
+                time.sleep(1)
+        
+        elif "Toggle Streak" in action:
+            config = load_config()
+            current_state = config.get("show_streak", True)
+            
+            toggle_choice = questionary.confirm(
+                f"Show streak icon? (Currently: {'ON' if current_state else 'OFF'})",
+                default=current_state
+            ).ask()
+            
+            if toggle_choice is not None:
+                config["show_streak"] = toggle_choice
+                save_config(config)
+                status = "enabled" if toggle_choice else "disabled"
+                print(f"[bold green]Streak display {status}![/]")
                 import time
                 time.sleep(1)
         
@@ -1569,6 +1770,11 @@ if __name__ == "__main__":
     # Handle 'rc del' shortcut
     elif len(sys.argv) >= 3 and sys.argv[1] == "rc" and sys.argv[2] == "del":
         sys.argv[1] = "rcdel"
+        sys.argv.pop(2)
+    
+    # Handle 'template del' shortcut
+    elif len(sys.argv) >= 3 and sys.argv[1] == "template" and sys.argv[2] == "del":
+        sys.argv[1] = "templatedel"
         sys.argv.pop(2)
         
     # Handle '?' shortcut for intro

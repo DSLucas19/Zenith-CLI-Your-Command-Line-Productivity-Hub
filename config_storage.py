@@ -4,7 +4,8 @@ import os
 CONFIG_FILE = "config.json"
 
 DEFAULT_CONFIG = {
-    "theme": "rainbow"
+    "theme": "rainbow",
+    "show_streak": True
 }
 
 def load_config():
@@ -12,7 +13,12 @@ def load_config():
         return DEFAULT_CONFIG
     try:
         with open(CONFIG_FILE, "r") as f:
-            return json.load(f)
+            config = json.load(f)
+            # Ensure default values for missing keys
+            for key, value in DEFAULT_CONFIG.items():
+                if key not in config:
+                    config[key] = value
+            return config
     except (json.JSONDecodeError, IOError):
         return DEFAULT_CONFIG
 
@@ -26,3 +32,7 @@ def save_config(config):
 def get_theme():
     config = load_config()
     return config.get("theme", "rainbow")
+
+def get_show_streak():
+    config = load_config()
+    return config.get("show_streak", True)

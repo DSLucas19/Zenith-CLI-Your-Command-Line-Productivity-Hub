@@ -69,9 +69,11 @@ def render_dashboard(tasks: List[Task]):
     from collections import defaultdict
     from datetime import timedelta
     from streak_storage import get_streak_display
+    from config_storage import get_show_streak
     
     # Show Streak at top right (compact)
-    console.print(Align.right(get_streak_display() + " "))
+    if get_show_streak():
+        console.print(Align.right(get_streak_display() + " "))
     
     now = datetime.now()
     today = now.date()
@@ -112,13 +114,28 @@ def render_dashboard(tasks: List[Task]):
             else:
                 grouped["Future"].append(task)
     
-    # Sort each group by priority (important first), then due date/title
+    # Sort each group by category (alphabetically), then priority, then due date
     for group in grouped.values():
-        group.sort(key=lambda x: (
-            -x.priority,  # Important first
-            x.due_date if x.due_date else datetime.max,  # Then by due date
-            x.title.lower()  # Then alphabetically
-        ))
+        def get_sort_key(task):
+            # Get primary category for sorting (first one if multiple, or empty string if none)
+            if task.category:
+                if isinstance(task.category, list) and task.category:
+                    primary_category = task.category[0].lower()
+                elif isinstance(task.category, str):
+                    primary_category = task.category.lower()
+                else:
+                    primary_category = ""
+            else:
+                primary_category = ""
+            
+            return (
+                primary_category,  # Group by category alphabetically
+                -task.priority,     # Then by priority (important first)
+                task.due_date if task.due_date else datetime.max,  # Then by due date
+                task.title.lower()  # Finally alphabetically by title
+            )
+        
+        group.sort(key=get_sort_key)
     
     # Define display order with rainbow colors for headers
     theme = get_current_theme()
