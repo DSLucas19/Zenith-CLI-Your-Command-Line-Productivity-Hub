@@ -13,6 +13,32 @@ from typing import List
 import calendar
 
 from config_storage import get_theme
+from categories_storage import load_categories
+
+def get_current_theme():
+    # Helper to get theme dict
+    import config_storage
+    theme_name = config_storage.get_theme()
+    return THEMES.get(theme_name, THEMES["rainbow"])
+
+def get_category_color(category_name: str) -> str:
+    """Get consistent color for a category based on its list index."""
+    cats = load_categories()
+    theme = get_current_theme()
+    colors = theme["rainbow_colors"]
+    
+    if not category_name:
+        return "white"
+        
+    cat_lower = category_name.lower().strip()
+    
+    try:
+        # Find index case-insensitive
+        idx = next(i for i, c in enumerate(cats) if c.strip().lower() == cat_lower)
+        return colors[idx % len(colors)]
+    except StopIteration:
+        # Fallback to hash if not in list
+        return colors[hash(cat_lower) % len(colors)]
 
 console = Console(force_terminal=True)
 
@@ -155,13 +181,8 @@ def render_dashboard(tasks: List[Task]):
                 category_counter[task.category.lower()] += 1
     
     # Create consistent color mapping for categories
-    def get_category_color(category_name):
-        """Get consistent color for a category using hash"""
-        theme = get_current_theme()
-        colors = theme["rainbow_colors"]
-        # Use hash of lowercase to get consistent index regardless of capitalization
-        color_index = hash(category_name.lower()) % len(colors)
-        return colors[color_index]
+    # Remove local helper, use global get_category_color
+
     
     # Track global task ID
     task_id = 1
@@ -187,7 +208,9 @@ def render_dashboard(tasks: List[Task]):
             id_str = f"[bold {theme['primary']}]{task_id}[/bold {theme['primary']}]"
             
             # Checkbox
-            if task.completed:
+            if task.title.startswith("📅"):
+                check = "   "
+            elif task.completed:
                 check = "[dim][✓][/dim]"
             else:
                 check = "[ ]"
@@ -326,7 +349,12 @@ def render_task_list(tasks: List[Task]):
         id_str = f"[bold {theme['primary']}]{task_id}[/bold {theme['primary']}]"
         
         # Checkbox
-        check = "[dim][✓][/dim]" if task.completed else "[ ]"
+        if task.title.startswith("📅"):
+            check = "   "
+        elif task.completed:
+            check = "[dim][✓][/dim]"
+        else:
+            check = "[ ]"
         
         # Due date
         due_str = task.due_date.strftime('%a %b %d') if task.due_date else ""
@@ -513,7 +541,12 @@ def render_calendar_interactive(tasks: List[Task]):
     now = datetime.now()
     year = now.year
     month = now.month
+    year = now.year
+    month = now.month
     digit_buffer = ""
+    
+    # Sort tasks by date to ensure IDs match other views
+    tasks.sort(key=lambda t: t.due_date if t.due_date else datetime.max)
     
     def get_task_color(task):
         theme = get_current_theme()
@@ -527,9 +560,7 @@ def render_calendar_interactive(tasks: List[Task]):
         if not cat_to_use:
             return "white"
             
-        colors = theme["rainbow_colors"]
-        color_index = hash(cat_to_use.lower()) % len(colors)
-        return colors[color_index]
+        return get_category_color(cat_to_use)
     
     def show_day_events(day: int):
         """Display events for a specific day."""
@@ -561,10 +592,14 @@ def render_calendar_interactive(tasks: List[Task]):
                 has_desc = getattr(task, 'description', None) is not None
                 desc_icon = " 📝" if has_desc else ""
                 
+                # Calculate ID
+                idx = tasks.index(task) + 1
+                display_id = f"#{idx}"
+                
                 if time_str:
-                    console.print(f"  [dim]{task.id_display}[/dim] [{color}]• {time_str}[/{color}] {task.title}{desc_icon}")
+                    console.print(f"  [dim]{display_id}[/dim] [{color}]• {time_str}[/{color}] {task.title}{desc_icon}")
                 else:
-                    console.print(f"  [dim]{task.id_display}[/dim] [{color}]•[/{color}] {task.title}{desc_icon}")
+                    console.print(f"  [dim]{display_id}[/dim] [{color}]•[/{color}] {task.title}{desc_icon}")
                     
                 if task.category:
                     if isinstance(task.category, list):

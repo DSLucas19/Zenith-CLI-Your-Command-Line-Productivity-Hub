@@ -59,7 +59,11 @@ def resolve_category_input(input_str: str) -> List[str]:
         if part.isdigit():
             idx = int(part) - 1  # Convert to 0-based index
             if 0 <= idx < len(cats):
-                result.append(cats[idx])
+                resolved = cats[idx]
+                if "," in resolved:
+                    result.extend([c.strip() for c in resolved.split(',') if c.strip()])
+                else:
+                    result.append(resolved)
             else:
                 # ID out of range, treat as literal
                 result.append(part.capitalize())
@@ -303,13 +307,11 @@ def add(
         if lower_due == "today":
             due_date = now
         elif lower_due == "tomorrow":
-            due_date = now.replace(day=now.day + 1) # simple logic, careful with month end
-            # better logic for tomorrow:
             from datetime import timedelta
             due_date = now + timedelta(days=1)
         else:
             try:
-                due_date = date_parser.parse(due)
+                due_date = date_parser.parse(due, fuzzy=True)
             except:
                 print(f"[red]Could not parse date: {due}[/]")
                 return
@@ -319,10 +321,18 @@ def add(
         if add_date:
             date_str = questionary.text("Due Date:").ask()
             if date_str:
-                try:
-                    due_date = date_parser.parse(date_str)
-                except:
-                    print(f"[red]Could not parse date.[/]")
+                lower_due = date_str.lower()
+                now = datetime.now()
+                if lower_due == "today":
+                    due_date = now
+                elif lower_due == "tomorrow":
+                    from datetime import timedelta
+                    due_date = now + timedelta(days=1)
+                else:
+                    try:
+                        due_date = date_parser.parse(date_str, fuzzy=True)
+                    except:
+                        print(f"[red]Could not parse date.[/]")
     
     # Parse time duration
     duration_seconds = None
@@ -695,6 +705,19 @@ def update(
     description: Optional[str] = typer.Option(None, "-i", "--info", help="Set or update task description")
 ):
     """Update a task's category, due date, duration, or importance by its ID."""
+    # Ensure task_id is string
+    task_id = str(task_id)
+    
+    # Handle multiple IDs (e.g. "1,2,#1")
+    if "," in task_id:
+        ids = [x.strip() for x in task_id.split(',') if x.strip()]
+        if len(ids) > 1:
+            print(f"[cyan]Batch updating {len(ids)} items...[/]")
+            for i in ids:
+                print(f"\n[dim]--- Updating {i} ---[/]")
+                update(i, category, due, time, flag, rc, description)
+            return
+
     task, all_tasks = resolve_task_target(task_id)
     
     if not task:
@@ -726,7 +749,7 @@ def update(
             task.due_date = None
         else:
             try:
-                task.due_date = date_parser.parse(due)
+                task.due_date = date_parser.parse(due, fuzzy=True)
             except:
                 print(f"[red]Could not parse date: {due}[/]")
                 return
@@ -952,23 +975,48 @@ def categories():
 # Modify the add command to handle 'cat' subcommand
 @app.command()
 def addcat(
-    name: str = typer.Argument(..., help="Category name(s) to add (comma-separated for multiple)")
+    name: str = typer.Argument(..., help="Category name(s) to add"),
+    group: bool = typer.Option(False, "--group", "-g", help="Treat input as a single grouped category")
 ):
-    """Add new category(ies) to the categories list."""
+    """Add new category(ies). Use -g to create a category group (e.g. 'Work, Study')."""
     cats = load_categories()
     
-    # Parse comma-separated categories
-    new_cats = [c.strip().capitalize() for c in name.split(',') if c.strip()]
+    # Check for group intent if comma present
+    if "," in name and not group:
+        # Prompt user logic
+        print(f"[yellow]Input contains commas: '{name}'[/]")
+        is_group = questionary.confirm(
+            "Do you want to create this as a single GROUP category?",
+            default=False
+        ).ask()
+        if is_group:
+            group = True
+
+    if group:
+        new_cats = [name.strip()] # Create as single entry
+    else:
+        # Parse comma-separated categories (Original behavior)
+        new_cats = [c.strip().capitalize() for c in name.split(',') if c.strip()]
     
     added = []
     skipped = []
     
     for cat in new_cats:
-        if cat in cats:
-            skipped.append(cat)
+        cat_clean = cat.strip() 
+        # Don't capitalize if group? Maybe Capitalize whole string?
+        # User might want "Work, Study".
+        # Let's capitalize strictly if not group.
+        # If group, maybe keep as is or Title Case? 
+        # Line 967 used .capitalize().
+        
+        if not group:
+             cat_clean = cat_clean.capitalize()
+        
+        if cat_clean in cats:
+            skipped.append(cat_clean)
         else:
-            cats.append(cat)
-            added.append(cat)
+            cats.append(cat_clean)
+            added.append(cat_clean)
     
     if added:
         save_categories(cats)
@@ -1618,7 +1666,10 @@ def template_del(
         print("[yellow]Deletion cancelled.[/]")
 
 
+
 @app.command(name="welcome")
+@app.command(name="home")
+@app.command(name="main")
 def welcome():
     """Show welcome screen with available commands."""
     ui.print_welcome_screen()

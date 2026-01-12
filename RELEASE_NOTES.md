@@ -1,3 +1,33 @@
+# TDL - Productivity Boost Update (v2.2) 🚀
+
+## Version Comparison
+| Feature | v2.1 | v2.2 (New) |
+|---------|------|------------|
+| **Categories** | Single tags | **Group Aliases** (`Work, Study`) 🏷️ |
+| **Updating** | One at a time | **Batch Update** (`update 1,2 -c Work`) ⚡ |
+| **Shortcuts** | `TDL welcome` | `TDL home`, `TDL main` 🏠 |
+| **UI** | Random colors | **Consistent/Fixed Colors** for categories 🎨 |
+| **Cleanliness** | Events checked? | **Smart Icons** (No checkbox for events) 🗓️ |
+
+## 🌟 Key New Features
+
+### 1. Grouped Categories
+Assign multiple tags instantly!
+- Create a group: `TDL add cat "Work, Study"`
+- Use it: `TDL add "Task" -c <GroupID>` -> Automatically applies both tags.
+
+### 2. Batch Update
+Modify multiple tasks at once.
+- `TDL update 1,2,3 -d tomorrow` sets all to tomorrow.
+- Works for events too: `TDL update #1,#2 -c Meeting`.
+
+### 3. Visual Polish
+- **Fixed Colors**: Categories now keep their assigned rainbow color permanently (e.g. "Work" is always Red).
+- **Cleaner Events**: Events in `today`, `list`, and dashboard no longer show a confusing `[ ]` checkbox.
+- **Calendar Fix**: Interactive calendar now shows correct `#IDs` and sorts events properly.
+
+---
+
 # TDL - Heatmap & ID Overhaul Update (v2.1) 🔥
 
 ## Version Comparison
