@@ -13,6 +13,7 @@ class Task:
     completed_at: Optional[datetime] = None  # NEW: timestamp when task was completed
     priority: int = 0  # -1=unimportant, 0=normal, 1=important
     time_duration: Optional[int] = None  # Duration in seconds
+    description: Optional[str] = None  # Additional details
     # Recurrence fields
     recurrent: bool = False
     recurrence_type: Optional[str] = None  # "daily", "weekdays", "weekly", "biweekly", "monthly", "custom"
@@ -29,6 +30,7 @@ class Task:
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "priority": self.priority,
             "time_duration": self.time_duration,
+            "description": self.description,
             "recurrent": self.recurrent,
             "recurrence_type": self.recurrence_type,
             "recurrence_days": self.recurrence_days,
@@ -51,6 +53,7 @@ class Task:
             completed_at=datetime.fromisoformat(data["completed_at"]) if data.get("completed_at") else None,
             priority=priority,
             time_duration=data.get("time_duration"),
+            description=data.get("description"),
             recurrent=data.get("recurrent", False),
             recurrence_type=data.get("recurrence_type"),
             recurrence_days=data.get("recurrence_days"),

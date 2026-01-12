@@ -84,7 +84,7 @@ def render_statistics(
     theme = get_current_theme()
     rainbow_colors = theme["rainbow_colors"]
     
-    console.clear()
+    # console.clear() # Removed to prevent clearing command history
     
     # Header
     header = Text()
@@ -143,7 +143,9 @@ def render_statistics(
         bar_heights.append(height)
     
     # Width of Y-axis label area (e.g., "120m ┤")
-    y_label_width = len(str(y_max)) + 2
+    # Max width needs to account for number + "m"
+    max_label_len = len(str(y_max)) + 1
+    y_label_width = max_label_len + 1  # +1 for spacing
     
     # Generate chart from top to bottom
     for level in range(bar_height, 0, -1):
@@ -163,9 +165,9 @@ def render_statistics(
             
         if should_label:
             label = f"{minutes_at_level}m"
-            line.append(f"{label:>{y_label_width-2}} ┤ ", style="dim")
+            line.append(f"{label:>{y_label_width}} ┤ ", style="dim")
         else:
-            line.append(f"{'':>{y_label_width-2}} │ ", style="dim")
+            line.append(f"{'':>{y_label_width}} │ ", style="dim")
             
         # Draw Bars
         for i, height in enumerate(bar_heights):
@@ -177,12 +179,16 @@ def render_statistics(
         chart_lines.append(line)
     
     # Axis line
-    # Indent for Y-axis
-    axis_indent = " " * (y_label_width - 2) + " └─"
+    # Indent for Y-axis: label width + " ┤ " is space-char-space
+    # We want " └─" to align. " ┤ " has length 3.
+    # Previous line ends with " ┤ ".
+    # We need padding equal to y_label_width + 1 (for the space before ┤)
+    axis_indent = " " * (y_label_width) + " └─"
     chart_lines.append(Text(f"{axis_indent}" + "─" * 30, style="dim"))
     
     # Date labels (show every 5 days)
-    date_labels = Text(" " * (y_label_width + 1)) # Indent to align with bars
+    # Alignment: y_label_width + " ┤ " (3 chars)
+    date_labels = Text(" " * (y_label_width + 3)) # Indent to align with bars
     for i, date_str in enumerate(date_range):
         if i % 5 == 0:
             day = date_str.split("-")[2]  # Get day

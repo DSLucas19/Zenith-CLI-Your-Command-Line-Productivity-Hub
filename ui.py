@@ -6,6 +6,7 @@ from rich.table import Table
 from rich.text import Text
 from rich.style import Style
 from rich.align import Align
+from rich.columns import Columns
 from datetime import datetime
 from models import Task
 from typing import List
@@ -224,6 +225,9 @@ def render_dashboard(tasks: List[Task]):
             
             # Recurrence icon
             recurrence_icon = f"[{theme['secondary']}]🔁[/{theme['secondary']}]" if getattr(task, 'recurrent', False) else ""
+            
+            # Description icon
+            description_icon = f"[{theme['warning']}]📝[/{theme['warning']}]" if getattr(task, 'description', None) else ""
 
             
             # Apply styling based on priority and completion
@@ -236,7 +240,8 @@ def render_dashboard(tasks: List[Task]):
                     f"[dim strike]{tags}[/dim strike]" if tags else "",
                     f"[dim strike]{title}[/dim strike]",
                     f"[dim strike]{duration}[/dim strike]" if duration else "",
-                    recurrence_icon
+                    recurrence_icon,
+                    description_icon
                 ]
             elif task.priority == 1:
                 # Important tasks: red
@@ -247,7 +252,8 @@ def render_dashboard(tasks: List[Task]):
                     tags,
                     f"[bold red]{title}[/bold red]",
                     f"[red]{duration}[/red]" if duration else "",
-                    recurrence_icon
+                    recurrence_icon,
+                    description_icon
                 ]
             elif task.priority == -1:
                 # Unimportant tasks: dimmed
@@ -258,7 +264,8 @@ def render_dashboard(tasks: List[Task]):
                     f"[dim]{tags}[/dim]" if tags else "",
                     f"[dim]{title}[/dim]",
                     f"[dim]{duration}[/dim]" if duration else "",
-                    recurrence_icon
+                    recurrence_icon,
+                    description_icon
                 ]
             else:
                 # Normal tasks: white
@@ -269,7 +276,8 @@ def render_dashboard(tasks: List[Task]):
                     tags,
                     title,
                     duration,
-                    recurrence_icon
+                    recurrence_icon,
+                    description_icon
                 ]
 
             
@@ -346,6 +354,12 @@ def render_task_list(tasks: List[Task]):
         # Duration
         duration = task.get_duration_str() or ""
         
+        # Recurrence icon
+        recurrence_icon = f"[{theme['secondary']}]🔁[/{theme['secondary']}]" if getattr(task, 'recurrent', False) else ""
+        
+        # Description icon
+        description_icon = f"[{theme['warning']}]📝[/{theme['warning']}]" if getattr(task, 'description', None) else ""
+        
         # Apply styling based on priority and completion
         if task.completed:
             line_parts = [
@@ -353,7 +367,9 @@ def render_task_list(tasks: List[Task]):
                 f"[dim strike]{due_str}[/dim strike]" if due_str else "",
                 f"[dim strike]{tags}[/dim strike]" if tags else "",
                 f"[dim strike]{title}[/dim strike]",
-                f"[dim strike]{duration}[/dim strike]" if duration else ""
+                f"[dim strike]{duration}[/dim strike]" if duration else "",
+                recurrence_icon,
+                description_icon
             ]
         elif task.priority == 1:
             line_parts = [
@@ -361,7 +377,9 @@ def render_task_list(tasks: List[Task]):
                 f"[red]{due_str}[/red]" if due_str else "",
                 tags,
                 f"[bold red]{title}[/bold red]",
-                f"[red]{duration}[/red]" if duration else ""
+                f"[red]{duration}[/red]" if duration else "",
+                recurrence_icon,
+                description_icon
             ]
         elif task.priority == -1:
             line_parts = [
@@ -369,11 +387,13 @@ def render_task_list(tasks: List[Task]):
                 f"[dim]{due_str}[/dim]" if due_str else "",
                 f"[dim]{tags}[/dim]" if tags else "",
                 f"[dim]{title}[/dim]",
-                f"[dim]{duration}[/dim]" if duration else ""
+                f"[dim]{duration}[/dim]" if duration else "",
+                recurrence_icon,
+                description_icon
             ]
         else:
             line_parts = [
-                id_str, check, due_str, tags, title, duration
+                id_str, check, due_str, tags, title, duration, recurrence_icon, description_icon
             ]
         
         line = "  ".join(part for part in line_parts if part)
@@ -464,7 +484,16 @@ def render_calendar(tasks: List[Task], year: int = None, month: int = None):
             if current_date and current_date in tasks_by_date:
                 for idx, task in enumerate(tasks_by_date[current_date]):
                     color = get_task_color(task)
-                    cell_text.append(f"• {task.title[:10]}...\n", style=color)
+                    
+                    # Add description indicator
+                    has_desc = getattr(task, 'description', None) is not None
+                    desc_mark = "📝" if has_desc else ""
+                    
+                    # Truncate title to fit
+                    limit = 8 if has_desc else 10
+                    title_trunc = task.title[:limit] + ".." if len(task.title) > limit else task.title
+                    
+                    cell_text.append(f"• {title_trunc}{desc_mark}\n", style=color)
             
             row_cells.append(cell_text)
         
@@ -528,10 +557,14 @@ def render_calendar_interactive(tasks: List[Task]):
                 color = get_task_color(task)
                 time_str = task.due_date.strftime('%H:%M') if task.due_date.hour or task.due_date.minute else ""
                 
+                # Check for description
+                has_desc = getattr(task, 'description', None) is not None
+                desc_icon = " 📝" if has_desc else ""
+                
                 if time_str:
-                    console.print(f"  [{color}]• {time_str}[/{color}] {task.title}")
+                    console.print(f"  [dim]{task.id_display}[/dim] [{color}]• {time_str}[/{color}] {task.title}{desc_icon}")
                 else:
-                    console.print(f"  [{color}]•[/{color}] {task.title}")
+                    console.print(f"  [dim]{task.id_display}[/dim] [{color}]•[/{color}] {task.title}{desc_icon}")
                     
                 if task.category:
                     if isinstance(task.category, list):
@@ -539,6 +572,11 @@ def render_calendar_interactive(tasks: List[Task]):
                     else:
                         cat_str = f"#{task.category}"
                     console.print(f"    [dim]{cat_str}[/dim]")
+                
+                # Show description under the event
+                if has_desc:
+                    console.print(f"    [italic white]{task.description}[/italic white]")
+                    console.print() # Extra spacing
         
         console.print("\n[dim]Press any key to return to calendar...[/dim]")
         msvcrt.getch()
@@ -710,3 +748,207 @@ def render_notes(notes: List):
         padding=(1, 2)
     )
     console.print(panel)
+
+def render_activity_heatmap():
+    """Render Current Year activity heatmap (Jan 1 - Dec 31)."""
+    from history_storage import load_history
+    from config_storage import get_show_heatmap, get_theme
+    from datetime import datetime, timedelta
+    
+    if not get_show_heatmap():
+        return
+
+    history = load_history()
+    # Count per date
+    counts = {}
+    for t in history:
+        if t.completed_at:
+             d = t.completed_at.date()
+             counts[d] = counts.get(d, 0) + 1
+             
+    # Grid logic: Current Year
+    now = datetime.now()
+    year = now.year
+    jan1 = datetime(year, 1, 1).date()
+    
+    # Prepare rows
+    rows = [""] * 7
+    theme = get_current_theme()
+    
+    # 54 columns is safe max for any year layout (53 weeks + partial)
+    for c in range(54):
+        for r in range(7):
+             # Calculate date
+             # Grid starts at first week's Monday. 
+             # jan1 might be Wed (2). So offset 0-1 are empty. Offset 2 is Jan 1.
+             offset = c * 7 + r - jan1.weekday()
+             date = jan1 + timedelta(days=offset)
+             
+             if offset < 0 or date.year != year:
+                 # Outside current year boundaries -> Empty space
+                 rows[r] += "  " 
+                 continue
+                 
+             # Get count
+             cnt = counts.get(date, 0)
+             
+             # Determine style
+             if cnt == 0:
+                 color_tag = "[#444444]" # Dim gray
+                 symbol = "□"
+             else:
+                 symbol = "■"
+                 if cnt <= 2:
+                     color_tag = f"[dim {theme['success']}]"
+                 elif cnt <= 5:
+                     color_tag = f"[{theme['success']}]"
+                 else:
+                     color_tag = f"[bold {theme['success']}]" # Hot!
+             
+             rows[r] += f"{color_tag}{symbol}[/] "
+             
+    # Join rows
+    heatmap_str = "\n".join(rows)
+    
+    # Panel
+    panel = Panel(
+        Align.center(heatmap_str),
+        title=f"[bold {theme['success']}]🔥 {year} Activity[/]",
+        border_style=theme["warning"],
+        padding=(1, 2)
+    )
+    console.print(panel)
+
+def print_welcome_screen():
+    from rich.panel import Panel
+    from rich.text import Text
+    from streak_storage import get_streak_display
+    from config_storage import get_show_streak
+    
+    # ASCII Art Title with rainbow gradient
+    title_lines = [
+        "████████╗██████╗ ██╗         ███╗   ███╗ █████╗ ███╗   ██╗ █████╗  ██████╗ ███████╗██████╗ ",
+        "╚══██╔══╝██╔══██╗██║         ████╗ ████║██╔══██╗████╗  ██║██╔══██╗██╔════╝ ██╔════╝██╔══██╗",
+        "   ██║   ██║  ██║██║         ██╔████╔██║███████║██╔██╗ ██║███████║██║  ███╗█████╗  ██████╔╝",
+        "   ██║   ██║  ██║██║         ██║╚██╔╝██║██╔══██║██║╚██╗██║██╔══██║██║   ██║██╔══╝  ██╔══██╗",
+        "   ██║   ██████╔╝███████╗    ██║ ╚═╝ ██║██║  ██║██║ ╚████║██║  ██║╚██████╔╝███████╗██║  ██║",
+        "   ╚═╝   ╚═════╝ ╚══════╝    ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝"
+    ]
+    
+    # Theme-based colors for each line
+    theme = get_current_theme()
+    rainbow_colors = theme["rainbow_colors"]
+    
+    # Streak Display (Compact & Right Aligned)
+    if get_show_streak():
+        console.print(Align.right(get_streak_display() + " "), style="bold")
+    
+    for i, line in enumerate(title_lines):
+        console.print(line, style=f"bold {rainbow_colors[i % len(rainbow_colors)]}")
+    console.print()
+    
+    # Welcome message with theme gradient
+    welcome_text = Text()
+    welcome_text.append("✨ ", style=f"bold {theme['warning']}")
+    welcome_text.append("Welcome to ", style="bold white")
+    welcome_text.append("T", style=f"bold {theme['primary']}")
+    welcome_text.append("D", style=f"bold {theme['secondary']}")
+    welcome_text.append("L", style=f"bold {theme['success']}")
+    welcome_text.append(" - Your ", style="bold white")
+    welcome_text.append(f"{get_theme().capitalize()}", style=f"bold {theme['secondary']}")
+    welcome_text.append(" Terminal Task Manager! ", style="bold white")
+    welcome_text.append("✨", style=f"bold {theme['warning']}")
+    console.print(Panel(welcome_text, style=f"bold {theme['secondary']}", padding=(1, 2)))
+    console.print()
+    
+    # Commands organized by category
+    task_commands = Panel(
+        f"[bold {theme['error']}]Task Management[/]\n\n"
+        f"[{theme['success']}]TDL db[/]              - View all tasks\n"
+        f"[{theme['success']}]TDL add[/]             - Add new task\n"
+        f"[{theme['success']}]TDL add ... -r[/]      - Add recurring task\n"
+        f"[{theme['success']}]TDL <ID> -d/-c/-t[/]   - Update task\n"
+        f"[{theme['success']}]TDL del <ID>[/]        - Delete task\n"
+        f"[{theme['success']}]TDL check[/]           - Mark tasks complete\n"
+        f"[{theme['success']}]TDL info <ID>[/]       - View task details",
+        title=f"[bold {theme['error']}]📝 Tasks[/]",
+        border_style=theme["error"],
+        padding=(1, 2)
+    )
+    
+    focus_commands = Panel(
+        "[bold orange1]Deep Work[/]\n\n"
+        f"[{theme['success']}]TDL work <ID>[/]      - Start deep work session\n"
+        "[dim]  • Timer with GIF animation[/]\n"
+        "[dim]  • Press SPACE to pause[/]\n"
+        "[dim]  • Extend or complete after[/]\n\n",
+        title="[bold orange1]⏱ Focus[/]",
+        border_style="orange1",
+        padding=(1, 2)
+    )
+    
+    org_commands = Panel(
+        f"[bold {theme['success']}]Organization & Stats[/]\n\n"
+        f"[{theme['success']}]TDL add cat <name>[/] - Add category\n"
+        f"[{theme['success']}]TDL cat[/]            - List categories\n"
+        f"[{theme['success']}]TDL stat[/]           - View statistics\n"
+        f"[{theme['success']}]TDL settings[/]       - App settings\n"
+        f"[{theme['success']}]TDL clear[/]          - Archive done\n"
+        f"[{theme['success']}]TDL hist[/]           - View history",
+        title=f"[bold {theme['success']}]🗂 Organize[/]",
+        border_style=theme["success"],
+        padding=(1, 2)
+    )
+
+    filter_commands = Panel(
+        f"[bold {theme['primary']}]Views & Filters[/]\n\n"
+        f"[{theme['success']}]TDL calendar[/]       - Interactive Calendar\n"
+        f"[{theme['success']}]TDL rc[/]             - Recurring tasks\n"
+        f"[{theme['success']}]TDL today[/]          - Due today\n"
+        f"[{theme['success']}]TDL tomorrow[/]       - Due tomorrow\n"
+        f"[{theme['success']}]TDL this-week[/]     - Due this week\n"
+        f"[{theme['success']}]TDL this-month[/]    - Due this month",
+        title=f"[bold {theme['primary']}]📅 Views[/]",
+        border_style=theme["primary"],
+        padding=(1, 2)
+    )
+
+    
+    # Display in columns (2x2 grid)
+    console.print(Columns([task_commands, focus_commands], equal=True, expand=True))
+    console.print(Columns([org_commands, filter_commands], equal=True, expand=True))
+    console.print()
+    
+    # Quick tips
+    tips = Panel(
+        f"[bold {theme['secondary']}]💡 Quick Tips:[/]\n\n"
+        f"• Use [{theme['error']}]-f 1[/] for important, [dim]-f -1[/] unimportant\n"
+        "• Set duration: [orange1]-t 2h30m[/]\n"
+        f"• Relative dates: [{theme['success']}]today[/], [{theme['success']}]tomorrow[/]\n"
+        f"• Type [{theme['primary']}]TDL <ID>[/] to update tasks",
+        title=f"[bold {theme['secondary']}]✨ Tips[/]",
+        border_style=theme["secondary"],
+        padding=(1, 2)
+    )
+    console.print(tips)
+
+    console.print()
+    
+    # Activity Heatmap (Bottom)
+    render_activity_heatmap()
+    console.print()
+    
+    # Theme footer
+    footer_text = Text()
+    footer_words = ["✨", "Type", "TDL", "db", "to", "view", "your", "tasks", "✨"]
+    footer_colors = theme["rainbow_colors"]
+    
+    for i, word in enumerate(footer_words):
+        if word == "TDL" or word == "db":
+            footer_text.append(word, style=f"bold {footer_colors[i % len(footer_colors)]}")
+        else:
+            footer_text.append(word, style=footer_colors[i % len(footer_colors)])
+        footer_text.append(" ")
+    
+    console.print(Align.center(footer_text))
+    console.print()

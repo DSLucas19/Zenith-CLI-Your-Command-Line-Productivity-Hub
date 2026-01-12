@@ -5,7 +5,8 @@ CONFIG_FILE = "config.json"
 
 DEFAULT_CONFIG = {
     "theme": "rainbow",
-    "show_streak": True
+    "show_streak": True,
+    "show_heatmap": True
 }
 
 def load_config():
@@ -36,3 +37,7 @@ def get_theme():
 def get_show_streak():
     config = load_config()
     return config.get("show_streak", True)
+
+def get_show_heatmap():
+    config = load_config()
+    return config.get("show_heatmap", True)
