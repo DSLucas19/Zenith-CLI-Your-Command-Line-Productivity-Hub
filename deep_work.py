@@ -13,6 +13,13 @@ import json
 import tempfile
 from pathlib import Path
 
+# Windows notification support
+try:
+    from win11toast import toast
+    NOTIFICATIONS_AVAILABLE = True
+except ImportError:
+    NOTIFICATIONS_AVAILABLE = False
+
 # Status codes for return values
 STATUS_COMPLETED = 0
 STATUS_DISMISSED = 1
@@ -41,6 +48,63 @@ def set_window_always_on_top():
     except Exception:
         pass
     return False
+
+
+def bring_window_to_foreground():
+    """Bring the console window to the foreground and focus it."""
+    try:
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        
+        hwnd = kernel32.GetConsoleWindow()
+        if hwnd:
+            # Constants
+            SW_RESTORE = 9
+            
+            # Restore window if minimized
+            user32.ShowWindow(hwnd, SW_RESTORE)
+            
+            # Bring to foreground
+            user32.SetForegroundWindow(hwnd)
+            
+            # Flash the window to get attention
+            user32.FlashWindow(hwnd, True)
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def send_completion_notification(task_title, elapsed_seconds):
+    """Send a Windows toast notification when the session completes."""
+    try:
+        # Format duration
+        hours = elapsed_seconds // 3600
+        minutes = (elapsed_seconds % 3600) // 60
+        
+        if hours > 0:
+            duration_str = f"{hours}h {minutes}m"
+        else:
+            duration_str = f"{minutes}m"
+        
+        # Truncate long task titles
+        display_title = task_title[:50] + "..." if len(task_title) > 50 else task_title
+        
+        if NOTIFICATIONS_AVAILABLE:
+            # Send Windows toast notification
+            toast(
+                "Deep Work Session Complete! 🎉",
+                f"{display_title}\n\nTime worked: {duration_str}",
+                duration="short",
+                on_click=None
+            )
+        
+        # Always bring window to foreground
+        bring_window_to_foreground()
+        
+    except Exception as e:
+        # Silently fail notification, but still try to bring window forward
+        bring_window_to_foreground()
 
 
 def set_console_size(width, height):
@@ -257,37 +321,52 @@ def run_deep_work_session(task_title, duration_seconds, result_file):
                 elif key == 'q':
                     # Ask about what to do with progress
                     live.stop()
+                    
+                    # Clear any pending input from the buffer
+                    import msvcrt
+                    while msvcrt.kbhit():
+                        msvcrt.getch()
+                    
+                    # Small delay to ensure console is ready
+                    time.sleep(0.3)
+                    
+                    # Always show interrupt menu
+                    console.print("\n[bold yellow]⏸ INTERRUPTED[/]")
                     if elapsed_seconds > 0:
-                        console.print("\n[bold yellow]⏸ INTERRUPTED[/] ", end="")
                         console.print(f"[dim]Worked: {format_time(elapsed_seconds)}[/]")
-                        console.print("[1] Save (update task duration)")
-                        console.print("[2] Erase (discard progress)")
-                        console.print("[3] Resume (go back to timer)")
-                        
-                        choice = input("Op (1-3, def=3): ").strip()
-                        
-                        if choice == '1':
-                            # Save progress - remaining time will be the new duration
-                            session_result = {"status": "saved", "remaining": remaining_seconds}
-                            console.print(f"\n[green]✓ Progress saved! Remaining: {format_time(remaining_seconds)}[/]")
-                            time.sleep(1)
-                            break
-                        elif choice == '2':
-                            # Erase session
-                            session_result = {"status": "cancelled", "remaining": None}
-                            console.print("\n[yellow]Session erased.[/]")
-                            time.sleep(1)
-                            break
-                        else:
-                            # Resume (default)
-                            console.print("\n[green]Resuming...[/]")
-                            is_paused = False
-                            last_update = time.time()
-                            live.start()
-                            continue
-                    else:
-                        session_result = {"status": "cancelled", "remaining": None}
+                    console.print("[1] Save progress")
+                    console.print("[2] Quit (discard)")
+                    console.print("[3] Resume")
+                    
+                    try:
+                        choice = input("Option (1-3, default=3): ").strip()
+                    except (EOFError, KeyboardInterrupt):
+                        choice = '3'  # Default to resume on error
+                    
+                    if choice == '1':
+                        # Save progress - remaining time will be the new duration
+                        session_result = {"status": "saved", "remaining": remaining_seconds}
+                        console.print(f"\n[green]✓ Progress saved! Remaining: {format_time(remaining_seconds)}[/]")
+                        time.sleep(1)
                         break
+                    elif choice == '2':
+                        # Quit/Erase session
+                        session_result = {"status": "cancelled", "remaining": None}
+                        console.print("\n[yellow]Session ended.[/]")
+                        time.sleep(1)
+                        break
+                    else:
+                        # Resume (default)
+                        console.print("\n[green]Resuming...[/]")
+                        is_paused = False
+                        last_update = time.time()
+                        
+                        # Clear any pending input again before resuming
+                        while msvcrt.kbhit():
+                            msvcrt.getch()
+                        
+                        live.start()
+                        continue
                 
                 # Update timer every second
                 if current_time - last_update >= 1.0 and not is_paused:
@@ -301,6 +380,10 @@ def run_deep_work_session(task_title, duration_seconds, result_file):
             # Timer finished
             if remaining_seconds <= 0:
                 live.stop()
+                
+                # Send notification and bring window to foreground
+                send_completion_notification(task_title, elapsed_seconds)
+                
                 result = show_completion_screen()
                 
                 # Handle extend
@@ -336,6 +419,10 @@ def run_deep_work_session(task_title, duration_seconds, result_file):
                             
                             if remaining_seconds <= 0:
                                 live2.stop()
+                                
+                                # Send notification for extended session completion
+                                send_completion_notification(task_title, elapsed_seconds)
+                                
                                 result = show_completion_screen()
                             else:
                                 result = None
@@ -355,6 +442,9 @@ def run_deep_work_session(task_title, duration_seconds, result_file):
             json.dump(session_result, f)
     except Exception as e:
         print(f"Error saving result: {e}")
+    
+    # Return the session result so subprocess handler can display it
+    return session_result
 
 
 def start_deep_work(task_title, duration_seconds, gif_path=None):
@@ -430,13 +520,27 @@ if __name__ == "__main__":
     
     if args.run_session:
         result_file = args.result_file or os.path.join(tempfile.gettempdir(), "tdl_result.json")
+        session_result = None
         try:
-            run_deep_work_session(args.title, args.duration, result_file)
+            session_result = run_deep_work_session(args.title, args.duration, result_file)
+            
+            # If session was interrupted (saved/cancelled), give user time to see the message
+            if session_result and session_result.get("status") in ["saved", "cancelled"]:
+                print("\n[Press Enter to close]")
+                try:
+                    input()
+                except (EOFError, KeyboardInterrupt):
+                    pass
+                    
         except Exception as e:
             print(f"\n\nFATAL ERROR: {e}")
             import traceback
             traceback.print_exc()
             print("\nPress Enter to close...")
-            input()
+            try:
+                input()
+            except:
+                pass
             sys.exit(1)
         sys.exit(0)  # Ensure terminal closes on success
+

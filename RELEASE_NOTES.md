@@ -1,4 +1,33 @@
-# TDL - Productivity Boost Update (v2.2) 🚀
+# TDL - Color & Consistency Update (v2.3) 🎨
+
+## Version Comparison
+| Feature | v2.2 | v2.3 (New) |
+|---------|------|------------|
+| **Category Colors** | Random/Inconsistent | **Persistent & Editable** (`TDL color`) consistent across all views 🌈 |
+| **Notifications** | None | **Windows Toast Notification** when Deep Work ends 🔔 |
+| **Calendar** | Standard Dot | **Colored Title & Grid** matching category 📅 |
+| **Recurring** | buggy/clogged | **Clean Spawning** (Correctly generates next instance) 🔁 |
+
+## 🌟 Key New Features
+
+### 1. Persistent Category Colors
+Finally, your colors stick!
+- **Auto-Assign**: New categories get a unique color automatically.
+- **Fully Customizable**: Use `TDL color Work red` to set your vibe.
+- **Everywhere**: The same color appears in Dashboard, Calendar (Grid & List), and Task Lists.
+- **Smart Listing**: `TDL color` discovers all used tags and hides overlapping duplicates.
+
+### 2. Deep Work Notifications
+- Get a native **Windows Notification** when your focus session completes.
+- The window automatically pops to the foreground so you never miss the break.
+
+### 3. Consistency Fixes
+- **Unified IDs**: No more mismatched IDs between Calendar and Dashboard.
+- **Recurring Tasks**: Completing a recurring task now cleanly spawns the next one without ID conflicts.
+- **Persistent Header**: The "TDL MANAGER" header stays put in interactive mode.
+
+---
+
 
 ## Version Comparison
 | Feature | v2.1 | v2.2 (New) |

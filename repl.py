@@ -33,21 +33,40 @@ def get_prompt_style():
     return "[bold cyan]TDL[/bold cyan] [dim]>[/dim] "
 
 
+def print_ascii_header():
+    """Print the TDL MANAGER ASCII art header."""
+    import os
+    os.system('cls' if os.name == 'nt' else 'clear')
+    
+    if ui:
+        theme = ui.get_current_theme()
+        rainbow_colors = theme.get("rainbow_colors", ["cyan", "magenta", "green", "yellow", "blue", "red"])
+    else:
+        rainbow_colors = ["cyan", "magenta", "green", "yellow", "blue", "red"]
+    
+    title_lines = [
+        "████████╗██████╗ ██╗         ███╗   ███╗ █████╗ ███╗   ██╗ █████╗  ██████╗ ███████╗██████╗ ",
+        "╚══██╔══╝██╔══██╗██║         ████╗ ████║██╔══██╗████╗  ██║██╔══██╗██╔════╝ ██╔════╝██╔══██╗",
+        "   ██║   ██║  ██║██║         ██╔████╔██║███████║██╔██╗ ██║███████║██║  ███╗█████╗  ██████╔╝",
+        "   ██║   ██║  ██║██║         ██║╚██╔╝██║██╔══██║██║╚██╗██║██╔══██║██║   ██║██╔══╝  ██╔══██╗",
+        "   ██║   ██████╔╝███████╗    ██║ ╚═╝ ██║██║  ██║██║ ╚████║██║  ██║╚██████╔╝███████╗██║  ██║",
+        "   ╚═╝   ╚═════╝ ╚══════╝    ╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚═╝  ╚═╝"
+    ]
+    
+    for i, line in enumerate(title_lines):
+        console.print(line, style=f"bold {rainbow_colors[i % len(rainbow_colors)]}")
+    console.print()
+
+
 def show_repl_welcome():
     """Show welcome message for REPL mode."""
+    print_ascii_header()
+    
     if ui:
         theme = ui.get_current_theme()
     else:
         theme = {"primary": "cyan", "secondary": "magenta", "success": "green"}
     
-    welcome = Text()
-    welcome.append("✨ ", style="bold yellow")
-    welcome.append("TDL Interactive Mode", style=f"bold {theme['primary']}")
-    welcome.append(" ✨", style="bold yellow")
-    
-    console.print()
-    console.print(Panel(welcome, border_style=theme['secondary'], padding=(0, 2)))
-    console.print()
     console.print(f"[dim]Type commands directly (e.g., 'db', 'add \"Task\"', 'cat')[/dim]")
     console.print(f"[dim]Type 'help' for available commands, 'exit' or 'q' to quit[/dim]")
     console.print()
@@ -138,20 +157,8 @@ def execute_command(cmd_line: str) -> bool:
 
 def run_repl():
     """Main REPL loop."""
-    # Clear screen and show welcome
-    os.system('cls' if os.name == 'nt' else 'clear')
-    
-    # Show the full welcome screen first
-    try:
-        script_dir = os.path.dirname(os.path.abspath(__file__)) or '.'
-        subprocess.run([sys.executable, os.path.join(script_dir, 'main.py'), 'welcome'], 
-                      cwd=script_dir)
-    except Exception:
-        show_repl_welcome()
-    
-    console.print()
-    console.print(f"[dim]Interactive mode active. Type 'help' for commands, 'exit' to quit.[/dim]")
-    console.print()
+    # Show initial welcome with ASCII header
+    show_repl_welcome()
     
     # Main loop
     while True:

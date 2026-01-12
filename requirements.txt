@@ -3,3 +3,4 @@ rich
 questionary
 python-dateutil
 Pillow
+win11toast

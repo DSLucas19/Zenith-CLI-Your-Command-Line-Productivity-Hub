@@ -72,7 +72,8 @@ Designed to be "fast as thought", Zenith CLI ensures you spend less time managin
 | `TDL tomorrow` | | View tasks & events for **Tomorrow**. |
 | `TDL rc` | | Manage recurring tasks. |
 | `TDL goals` | | Open the Goals notebook. |
-| `TDL cat` | | Manage categories. |
+| `TDL cat` | | Manage categories (renaming/grouping). |
+| `TDL color` | | **Manage Colors** (List or set category colors). |
 | `TDL ?` | `intro` | Detailed introduction and features. |
 | `TDL` | `welcome` | The main welcome tab of the app. |
 

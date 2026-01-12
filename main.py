@@ -73,6 +73,32 @@ def resolve_category_input(input_str: str) -> List[str]:
     
     return result
 
+def get_global_task_id_map() -> dict:
+    """
+    Create a mapping of task.id -> display_id based on dashboard order.
+    This ensures consistent IDs across all views (db, today, tomorrow, etc.)
+    """
+    all_tasks = load_tasks()
+    
+    # Separate tasks and events
+    tasks_only = [t for t in all_tasks if not t.title.startswith("📅")]
+    events_only = [t for t in all_tasks if t.title.startswith("📅")]
+    
+    # Get ordered tasks using dashboard order
+    ordered_tasks = get_task_dashboard_order(tasks_only)
+    ordered_events = get_task_dashboard_order(events_only)
+    
+    # Create ID mapping
+    id_map = {}
+    for idx, task in enumerate(ordered_tasks, 1):
+        id_map[task.id] = idx
+    
+    # Events get # prefix IDs (but we'll store just the number)
+    for idx, event in enumerate(ordered_events, 1):
+        id_map[event.id] = f"#{idx}"
+    
+    return id_map
+
 def get_task_dashboard_order(tasks: List[Task]) -> List[Task]:
     """Sort tasks identically to ui.render_dashboard grouping and sorting."""
     from datetime import datetime, timedelta
@@ -417,6 +443,9 @@ def today():
     now = datetime.now()
     today_date = now.date()
     
+    # Get global ID mapping for consistent IDs
+    global_id_map = get_global_task_id_map()
+    
     # Filter tasks due today
     today_tasks = [t for t in tasks if t.due_date and t.due_date.date() == today_date]
     
@@ -428,12 +457,12 @@ def today():
     
     if events:
         console.print("[bold yellow]Events:[/]")
-        ui.render_task_list(events)
+        ui.render_task_list(events, global_id_map)
         if tasks_only:
              console.print("[bold white]Tasks:[/]")
     
     if tasks_only:
-        ui.render_task_list(tasks_only)
+        ui.render_task_list(tasks_only, global_id_map)
     elif not events:
         print("[yellow]No tasks due today![/]")
 
@@ -444,6 +473,9 @@ def tomorrow():
     tasks = load_tasks()
     now = datetime.now()
     tomorrow_date = (now + timedelta(days=1)).date()
+    
+    # Get global ID mapping for consistent IDs
+    global_id_map = get_global_task_id_map()
     
     # Filter tasks due tomorrow
     tomorrow_tasks = [t for t in tasks if t.due_date and t.due_date.date() == tomorrow_date]
@@ -456,12 +488,12 @@ def tomorrow():
     
     if events:
         console.print("[bold yellow]Events:[/]")
-        ui.render_task_list(events)
+        ui.render_task_list(events, global_id_map)
         if tasks_only:
              console.print("[bold white]Tasks:[/]")
              
     if tasks_only:
-        ui.render_task_list(tasks_only)
+        ui.render_task_list(tasks_only, global_id_map)
     elif not events:
         print("[yellow]No tasks due tomorrow![/]")
 
@@ -475,6 +507,9 @@ def this_week():
     tomorrow = today + timedelta(days=1)
     week_end = today + timedelta(days=7)
     
+    # Get global ID mapping for consistent IDs
+    global_id_map = get_global_task_id_map()
+    
     # Filter tasks due this week (excluding today and tomorrow)
     week_tasks = [t for t in tasks if t.due_date and tomorrow < t.due_date.date() <= week_end]
     
@@ -486,12 +521,12 @@ def this_week():
     
     if events:
         console.print("[bold yellow]Events:[/]")
-        ui.render_task_list(events)
+        ui.render_task_list(events, global_id_map)
         if tasks_only:
              console.print("[bold white]Tasks:[/]")
 
     if tasks_only:
-        ui.render_task_list(tasks_only)
+        ui.render_task_list(tasks_only, global_id_map)
     elif not events:
         print("[yellow]No more tasks due this week![/]")
 
@@ -505,6 +540,9 @@ def this_month():
     week_end = today + timedelta(days=7)
     month_end = today + timedelta(days=30)
     
+    # Get global ID mapping for consistent IDs
+    global_id_map = get_global_task_id_map()
+    
     # Filter tasks due this month (excluding this week)
     month_tasks = [t for t in tasks if t.due_date and week_end < t.due_date.date() <= month_end]
     
@@ -516,12 +554,12 @@ def this_month():
     
     if events:
         console.print("[bold yellow]Events:[/]")
-        ui.render_task_list(events)
+        ui.render_task_list(events, global_id_map)
         if tasks_only:
              console.print("[bold white]Tasks:[/]")
 
     if tasks_only:
-        ui.render_task_list(tasks_only)
+        ui.render_task_list(tasks_only, global_id_map)
     elif not events:
         print("[yellow]No more tasks due this month![/]")
 
@@ -533,7 +571,10 @@ def calendar():
     # Filter to show only events (strictly starting with 📅)
     events = [t for t in tasks if t.title.startswith("📅")]
     
-    ui.render_calendar_interactive(events)
+    # Get global ID mapping for consistent IDs
+    global_id_map = get_global_task_id_map()
+    
+    ui.render_calendar_interactive(events, global_id_map)
     
     # Refresh screen and show welcome on exit
     os.system('cls' if os.name == 'nt' else 'clear')
@@ -641,10 +682,143 @@ def event(
             cat_display = f"#{categories}"
         print(f"[dim]Categories: {cat_display}[/]")
 
+def calculate_next_recurrence(task: Task) -> Optional[datetime]:
+    """Calculate the next due date for a recurring task."""
+    from dateutil.relativedelta import relativedelta
+    
+    if not task.due_date:
+        start_date = datetime.now()
+    else:
+        start_date = task.due_date
+        
+    interval = task.recurrence_interval or 1
+    
+    if task.recurrence_type == "daily":
+        return start_date + timedelta(days=interval)
+        
+    elif task.recurrence_type == "weekdays":
+        # Find next weekday
+        next_date = start_date + timedelta(days=1)
+        while next_date.weekday() >= 5: # 5=Sat, 6=Sun
+            next_date += timedelta(days=1)
+        return next_date
+        
+    elif task.recurrence_type == "weekly":
+        return start_date + timedelta(weeks=interval)
+        
+    elif task.recurrence_type == "biweekly":
+        return start_date + timedelta(weeks=2*interval)
+        
+    elif task.recurrence_type == "monthly":
+        return start_date + relativedelta(months=interval)
+        
+    elif task.recurrence_type == "custom":
+        # Simple interval for now, ideally strictly follow task.recurrence_days if set
+        return start_date + timedelta(days=interval)
+        
+    return None
+
+def process_recurrence(task: Task) -> Optional[Task]:
+    """Create the next instance of a recurring task."""
+    next_due = calculate_next_recurrence(task)
+    if not next_due:
+        return None
+        
+    # Create new task copy
+    new_task = Task(
+        title=task.title,
+        category=task.category.copy() if task.category else None,
+        priority=task.priority,
+        description=task.description,
+        time_duration=task.time_duration,
+        due_date=next_due,
+        recurrent=True,
+        recurrence_type=task.recurrence_type,
+        recurrence_days=task.recurrence_days.copy() if task.recurrence_days else None,
+        recurrence_interval=task.recurrence_interval
+    )
+    return new_task
+
 @app.command()
-def check():
-    """Interactive task completion."""
+def check(
+    task_ids: Optional[str] = typer.Argument(None, help="Task ID(s) to mark as complete (comma-separated)")
+):
+    """Mark tasks as complete. Use IDs for fast completion or leave empty for interactive mode."""
     tasks = load_tasks()
+    
+    # Fast mode: Direct ID completion
+    if task_ids:
+        ids = [x.strip() for x in task_ids.split(',') if x.strip()]
+        
+        # Get ordered lists once to resolve IDs consistent with dashboard
+        tasks_only = [t for t in tasks if not t.title.startswith("📅")]
+        events_only = [t for t in tasks if t.title.startswith("📅")]
+        
+        ordered_tasks = get_task_dashboard_order(tasks_only)
+        ordered_events = get_task_dashboard_order(events_only)
+        
+        resolved_count = 0
+        new_recurring_tasks = []
+        completion_time = datetime.now()
+        
+        for task_id in ids:
+            target_task = None
+            
+            # Event ID (starts with #)
+            if task_id.startswith("#"):
+                clean_id = task_id[1:]
+                if clean_id.isdigit():
+                    idx = int(clean_id)
+                    if 1 <= idx <= len(ordered_events):
+                        target_task = ordered_events[idx - 1]
+            
+            # Task ID (number)
+            elif task_id.isdigit():
+                idx = int(task_id)
+                if 1 <= idx <= len(ordered_tasks):
+                    target_task = ordered_tasks[idx - 1]
+            
+            if target_task:
+                # Mark as complete
+                target_task.completed = True
+                target_task.completed_at = completion_time
+                resolved_count += 1
+                
+                # Handle Recurrence
+                if target_task.recurrent:
+                    print(f"[magenta]Processing recurrence for '{target_task.title}'...[/]")
+                    next_task = process_recurrence(target_task)
+                    if next_task:
+                        new_recurring_tasks.append(next_task)
+                        print(f"[magenta]  -> Next due: {next_task.due_date.strftime('%Y-%m-%d')}[/]")
+                    
+                    # Disable recurrence on the completed instance so it doesn't show in rc/spawn again
+                    target_task.recurrent = False
+            else:
+                print(f"[yellow]ID {task_id} not found/ignored.[/]")
+        
+        if resolved_count == 0:
+            return
+        
+        # Add new recurring instances to main list
+        if new_recurring_tasks:
+            tasks.extend(new_recurring_tasks)
+            
+        save_tasks(tasks)
+        
+        # Update streak
+        from streak_storage import update_streak, get_streak_display
+        from config_storage import get_show_streak
+        
+        streak, active = update_streak()
+        
+        if get_show_streak():
+            print(f"[bold green]Completed {resolved_count} task(s)![/] {get_streak_display()}")
+        else:
+            print(f"[bold green]Completed {resolved_count} task(s)![/]")
+        return
+    
+    # Interactive mode: Checkbox selection
     open_tasks = [t for t in tasks if not t.completed]
     
     if not open_tasks:
@@ -671,12 +845,26 @@ def check():
 
     if selected_ids:
         count = 0
+        new_recurring_tasks = []
         completion_time = datetime.now()
+        
         for t in tasks:
             if t.id in selected_ids:
                 t.completed = True
-                t.completed_at = completion_time  # NEW: track completion time
+                t.completed_at = completion_time
                 count += 1
+                
+                # Handle Recurrence (Interactive)
+                if t.recurrent:
+                    print(f"[magenta]Processing recurrence for '{t.title}'...[/]")
+                    next_task = process_recurrence(t)
+                    if next_task:
+                        new_recurring_tasks.append(next_task)
+                    t.recurrent = False
+
+        if new_recurring_tasks:
+            tasks.extend(new_recurring_tasks)
+            
         save_tasks(tasks)
         
         # Update streak
@@ -822,18 +1010,38 @@ def delete(
     """Delete a task (or multiple tasks) by ID (e.g. '1', '1,2', '#1')."""
     import typer
     
-    ids = [x.strip() for x in task_id.split(',') if x.strip()]
+    # Get ordered lists once to resolve IDs consistent with dashboard
+    tasks = load_tasks()
+    tasks_only = [t for t in tasks if not t.title.startswith("📅")]
+    events_only = [t for t in tasks if t.title.startswith("📅")]
+    
+    ordered_tasks = get_task_dashboard_order(tasks_only)
+    ordered_events = get_task_dashboard_order(events_only)
+    
     resolved_tasks = []
-    all_tasks_ref = None
+    ids = [x.strip() for x in task_id.split(',') if x.strip()]
     
     for i in ids:
-        try:
-            task, all_tasks = resolve_task_target(i)
-            resolved_tasks.append(task)
-            if all_tasks_ref is None:
-                all_tasks_ref = all_tasks
-        except (typer.Exit, SystemExit):
-            pass # Error message printed by resolve_task_target
+        target_task = None
+        
+        # Event ID (starts with #)
+        if i.startswith("#"):
+            clean_id = i[1:]
+            if clean_id.isdigit():
+                idx = int(clean_id)
+                if 1 <= idx <= len(ordered_events):
+                    target_task = ordered_events[idx - 1]
+        
+        # Task ID (number)
+        elif i.isdigit():
+            idx = int(i)
+            if 1 <= idx <= len(ordered_tasks):
+                target_task = ordered_tasks[idx - 1]
+        
+        if target_task:
+            resolved_tasks.append(target_task)
+        else:
+            print(f"[yellow]ID {i} not found/ignored.[/]")
             
     if not resolved_tasks:
         return
@@ -853,10 +1061,10 @@ def delete(
     if confirm:
         deleted_count = 0
         for t in resolved_tasks:
-            if t in all_tasks_ref:
-                all_tasks_ref.remove(t)
+            if t in tasks:
+                tasks.remove(t)
                 deleted_count += 1
-        save_tasks(all_tasks_ref)
+        save_tasks(tasks)
         print(f"[bold red]Deleted {deleted_count} task(s)![/] 🗑️")
     else:
         print("[yellow]Deletion cancelled.[/]")
@@ -903,7 +1111,6 @@ def rc():
     table.add_column("ID", width=4, style="bold cyan", justify="center")
     table.add_column("Task", style="white")
     table.add_column("Recurrence", style="magenta")
-    table.add_column("Due", style="yellow")
     
     # Get display IDs
     unassigned = [t for t in tasks if not t.due_date]
@@ -912,12 +1119,10 @@ def rc():
     
     for task in recurring:
         display_id = all_visible.index(task) + 1 if task in all_visible else "?"
-        due_str = task.due_date.strftime('%Y-%m-%d') if task.due_date else "-"
         table.add_row(
             str(display_id),
             task.title,
-            get_recurrence_display(task),
-            due_str
+            get_recurrence_display(task)
         )
     
     console.print(table)
@@ -947,30 +1152,100 @@ def rc_del(
     print(f"[green]Recurrence removed from '{task.title}'[/]")
 
 
-@app.command(name="cat")
+@app.command(name="categories")
 def categories():
     """Display all available categories."""
-
-
     cats = load_categories()
-    
     if not cats:
         print("[yellow]No categories defined yet. Use 'TDL add cat <name>' to create one.[/]")
         return
-    
 
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold bright_yellow on black", title="[bold yellow]📁 CATEGORIES[/]")
     table.add_column("ID", width=4, style="bold cyan", justify="center")
     table.add_column("Category Name", style="bold yellow")
+    table.add_column("Color", style="white")
     
     for i, cat in enumerate(cats, start=1):
-        color = ["red", "orange1", "yellow", "green", "blue", "purple", "violet"][(i-1) % 7]
+        color = ui.get_category_color(cat)
         table.add_row(
-            f"[bold cyan]{i}[/bold cyan]",
-            f"[bold {color}]{cat}[/bold {color}]"
+            str(i),
+            f"[bold {color}]{cat}[/bold {color}]",
+            f"[{color}]{color}[/]"
         )
     
     console.print(table)
+
+
+@app.command()
+def color(
+    category: Optional[str] = typer.Argument(None, help="Category name"),
+    color_val: Optional[str] = typer.Argument(None, help="Color name/hex code")
+):
+    """
+    Manage category colors.
+    Usage:
+    • List: TDL color
+    • Set:  TDL color Work red
+    """
+    from config_storage import get_category_colors, update_category_color
+    
+    if category and color_val:
+        # Set color
+        update_category_color(category, color_val)
+        print(f"[bold green]Set color for '{category}' to: [/][bold {color_val}]{color_val}[/]")
+        return
+        
+    # List colors
+    all_cats = set()
+    
+    # 1. From storage
+    stored_cats = load_categories()
+    if stored_cats:
+        all_cats.update(stored_cats)
+        
+    # 2. From config colors
+    colors = get_category_colors()
+    if colors:
+        all_cats.update(colors.keys())
+        
+    # 3. From actual tasks
+    tasks = load_tasks()
+    for t in tasks:
+        if t.category:
+            if isinstance(t.category, list):
+                all_cats.update(t.category)
+            else:
+                all_cats.add(t.category)
+
+    if not all_cats:
+        print("[yellow]No categories found.[/]")
+        return
+        
+    # Filter out "overlapping" legacy composite categories (e.g. "Work, SAT")
+    # if their individual parts exist separately.
+    final_cats = []
+    simple_cats = {c for c in all_cats if "," not in c}
+    
+    for cat in all_cats:
+        if "," in cat:
+            parts = [p.strip() for p in cat.split(",")]
+            # If all parts exist as standalone categories, hide the composite one
+            if all(p in simple_cats for p in parts):
+                continue
+        final_cats.append(cat)
+        
+    console.print("\n[bold magenta]Category Colors:[/]")
+    table = Table(box=box.ROUNDED, show_header=True)
+    table.add_column("Category", style="white")
+    table.add_column("Color", style="dim")
+    table.add_column("Preview", style="white")
+    
+    for cat in sorted(final_cats):
+        col = ui.get_category_color(cat)
+        table.add_row(cat, col, f"[{col}]██████[/]")
+        
+    console.print(table)
+    print()
 
 # Modify the add command to handle 'cat' subcommand
 @app.command()
@@ -1517,6 +1792,17 @@ def template_cmd(
     templates = load_templates()
     
     # If no title provided, list all templates
+    # Handle 'list' and 'add' pseudo-subcommands
+    if title:
+        first_arg = title[0].lower()
+        if first_arg == "list" and len(title) == 1:
+            title = []  # Trigger list view
+        elif first_arg == "add":
+            if len(title) > 1:
+                title = title[1:]  # Strip 'add'
+            else:
+                title = []  # 'tdl template add' -> list view (or could be error)
+    
     if not title:
         if not templates:
             print("[yellow]No templates found. Create one with 'TDL template <title> -a <alias>'[/]")
@@ -1798,6 +2084,7 @@ def settings():
             "🎨 Change Theme",
             "📊 Toggle Activity Heatmap",
             "� Toggle Streak Display",
+            "✨ Toggle Simplicity Mode",
             "�📖 View Manual",
             "🗑️  Reset All Data",
             "ℹ️  About Developer",
@@ -1866,6 +2153,23 @@ def settings():
                 save_config(config)
                 status = "enabled" if toggle_choice else "disabled"
                 print(f"[bold green]Heatmap {status}![/]")
+                import time
+                time.sleep(1)
+
+        elif "Toggle Simplicity" in action:
+            config = load_config()
+            current_state = config.get("simplicity", False)
+            
+            toggle_choice = questionary.confirm(
+                f"Enable simplicity mode? (Currently: {'ON' if current_state else 'OFF'})",
+                default=current_state
+            ).ask()
+            
+            if toggle_choice is not None:
+                config["simplicity"] = toggle_choice
+                save_config(config)
+                status = "enabled" if toggle_choice else "disabled"
+                print(f"[bold green]Simplicity mode {status}! (Hides panels on welcome screen)[/]")
                 import time
                 time.sleep(1)
         

@@ -12,7 +12,7 @@ from models import Task
 from typing import List
 import calendar
 
-from config_storage import get_theme
+from config_storage import get_theme, get_category_colors, update_category_color
 from categories_storage import load_categories
 
 def get_current_theme():
@@ -21,24 +21,39 @@ def get_current_theme():
     theme_name = config_storage.get_theme()
     return THEMES.get(theme_name, THEMES["rainbow"])
 
+AVAILABLE_COLORS = [
+    "bright_cyan", "bright_magenta", "bright_green", "bright_yellow", "bright_blue", "bright_red",
+    "cyan", "magenta", "green", "yellow", "blue", "red",
+    "orange1", "violet", "purple", "turquoise2", "chartreuse1", "gold1", "sky_blue1", "plum1",
+    "spring_green1", "medium_orchid1", "deep_sky_blue1"
+]
+
 def get_category_color(category_name: str) -> str:
-    """Get consistent color for a category based on its list index."""
-    cats = load_categories()
-    theme = get_current_theme()
-    colors = theme["rainbow_colors"]
-    
+    """Get consistent, persistent color for a category."""
     if not category_name:
         return "white"
         
-    cat_lower = category_name.lower().strip()
+    colors = get_category_colors()
+    if category_name in colors:
+        return colors[category_name]
     
-    try:
-        # Find index case-insensitive
-        idx = next(i for i, c in enumerate(cats) if c.strip().lower() == cat_lower)
-        return colors[idx % len(colors)]
-    except StopIteration:
-        # Fallback to hash if not in list
-        return colors[hash(cat_lower) % len(colors)]
+    # Assign new color (try to be unique)
+    used_colors = set(colors.values())
+    
+    # Find first unused color
+    for color in AVAILABLE_COLORS:
+        if color not in used_colors:
+            update_category_color(category_name, color)
+            return color
+            
+    # If all used, cycle using hash
+    import hashlib
+    hash_val = int(hashlib.md5(category_name.encode()).hexdigest(), 16)
+    idx = hash_val % len(AVAILABLE_COLORS)
+    color = AVAILABLE_COLORS[idx]
+    
+    update_category_color(category_name, color)
+    return color
 
 console = Console(force_terminal=True)
 
@@ -312,8 +327,13 @@ def render_dashboard(tasks: List[Task]):
     
     console.print()  # Final newline
 
-def render_task_list(tasks: List[Task]):
-    """Render a simple list of tasks without grouping"""
+def render_task_list(tasks: List[Task], global_id_map: dict = None):
+    """Render a simple list of tasks without grouping.
+    
+    Args:
+        tasks: List of tasks to render
+        global_id_map: Optional dict mapping task.id -> display_id for consistent IDs across views
+    """
     from collections import Counter
     
     # Count category frequency across all tasks for consistent coloring
@@ -326,13 +346,7 @@ def render_task_list(tasks: List[Task]):
             else:
                 category_counter[task.category.lower()] += 1
     
-    # Create consistent color mapping for categories
-    def get_category_color(category_name):
-        """Get consistent color for a category using hash"""
-        theme = get_current_theme()
-        colors = theme["rainbow_colors"]
-        color_index = hash(category_name.lower()) % len(colors)
-        return colors[color_index]
+
     
     # Sort by priority then due date
     sorted_tasks = sorted(tasks, key=lambda x: (
@@ -342,11 +356,17 @@ def render_task_list(tasks: List[Task]):
     ))
     
     # Render each task
-    task_id = 1
+    local_id = 1
     for task in sorted_tasks:
+        # Use global ID if provided, otherwise use local numbering
+        if global_id_map and task.id in global_id_map:
+            display_id = global_id_map[task.id]
+        else:
+            display_id = local_id
+        
         # ID
         theme = get_current_theme()
-        id_str = f"[bold {theme['primary']}]{task_id}[/bold {theme['primary']}]"
+        id_str = f"[bold {theme['primary']}]{display_id}[/bold {theme['primary']}]"
         
         # Checkbox
         if task.title.startswith("📅"):
@@ -426,7 +446,7 @@ def render_task_list(tasks: List[Task]):
         
         line = "  ".join(part for part in line_parts if part)
         console.print(line)
-        task_id += 1
+        local_id += 1
     
     console.print()
 
@@ -474,20 +494,17 @@ def render_calendar(tasks: List[Task], year: int = None, month: int = None):
             
     # Category color helper
     def get_task_color(task):
-        theme = get_current_theme()
         if not task.category:
              return "white"
              
         cat_to_use = task.category[0] if isinstance(task.category, list) and task.category else task.category
-        if isinstance(cat_to_use, list): # Should not happen based on logic above but safety check
+        if isinstance(cat_to_use, list):
             cat_to_use = cat_to_use[0]
             
         if not cat_to_use:
             return "white"
             
-        colors = theme["rainbow_colors"]
-        color_index = hash(cat_to_use.lower()) % len(colors)
-        return colors[color_index]
+        return get_category_color(cat_to_use)
 
     for week in month_cal:
         row_cells = []
@@ -532,15 +549,13 @@ def render_calendar(tasks: List[Task], year: int = None, month: int = None):
     
     return year, month
 
-def render_calendar_interactive(tasks: List[Task]):
+def render_calendar_interactive(tasks: List[Task], global_id_map: dict = None):
     """Interactive calendar with arrow key navigation and day selection."""
     import msvcrt
     import os
     import calendar as cal_module
     
     now = datetime.now()
-    year = now.year
-    month = now.month
     year = now.year
     month = now.month
     digit_buffer = ""
@@ -593,13 +608,16 @@ def render_calendar_interactive(tasks: List[Task]):
                 desc_icon = " 📝" if has_desc else ""
                 
                 # Calculate ID
-                idx = tasks.index(task) + 1
-                display_id = f"#{idx}"
+                if global_id_map and task.id in global_id_map:
+                    display_id = global_id_map[task.id]
+                else:
+                    # Fallback to local index if not found
+                    display_id = f"#{tasks.index(task) + 1}"
                 
                 if time_str:
-                    console.print(f"  [dim]{display_id}[/dim] [{color}]• {time_str}[/{color}] {task.title}{desc_icon}")
+                    console.print(f"  [dim]{display_id}[/dim] [{color}]• {time_str}[/{color}] [{color}]{task.title}{desc_icon}[/{color}]")
                 else:
-                    console.print(f"  [dim]{display_id}[/dim] [{color}]•[/{color}] {task.title}{desc_icon}")
+                    console.print(f"  [dim]{display_id}[/dim] [{color}]•[/{color}] [{color}]{task.title}{desc_icon}[/{color}]")
                     
                 if task.category:
                     if isinstance(task.category, list):
@@ -855,10 +873,13 @@ def render_activity_heatmap():
     console.print(panel)
 
 def print_welcome_screen():
+    import os
+    os.system('cls' if os.name == 'nt' else 'clear')
+    
     from rich.panel import Panel
     from rich.text import Text
     from streak_storage import get_streak_display
-    from config_storage import get_show_streak
+    from config_storage import get_show_streak, get_simplicity
     
     # ASCII Art Title with rainbow gradient
     title_lines = [
@@ -882,98 +903,102 @@ def print_welcome_screen():
         console.print(line, style=f"bold {rainbow_colors[i % len(rainbow_colors)]}")
     console.print()
     
-    # Welcome message with theme gradient
-    welcome_text = Text()
-    welcome_text.append("✨ ", style=f"bold {theme['warning']}")
-    welcome_text.append("Welcome to ", style="bold white")
-    welcome_text.append("T", style=f"bold {theme['primary']}")
-    welcome_text.append("D", style=f"bold {theme['secondary']}")
-    welcome_text.append("L", style=f"bold {theme['success']}")
-    welcome_text.append(" - Your ", style="bold white")
-    welcome_text.append(f"{get_theme().capitalize()}", style=f"bold {theme['secondary']}")
-    welcome_text.append(" Terminal Task Manager! ", style="bold white")
-    welcome_text.append("✨", style=f"bold {theme['warning']}")
-    console.print(Panel(welcome_text, style=f"bold {theme['secondary']}", padding=(1, 2)))
-    console.print()
+    # Check if simplicity mode is enabled
+    simplicity_mode = get_simplicity()
     
-    # Commands organized by category
-    task_commands = Panel(
-        f"[bold {theme['error']}]Task Management[/]\n\n"
-        f"[{theme['success']}]TDL db[/]              - View all tasks\n"
-        f"[{theme['success']}]TDL add[/]             - Add new task\n"
-        f"[{theme['success']}]TDL add ... -r[/]      - Add recurring task\n"
-        f"[{theme['success']}]TDL <ID> -d/-c/-t[/]   - Update task\n"
-        f"[{theme['success']}]TDL del <ID>[/]        - Delete task\n"
-        f"[{theme['success']}]TDL check[/]           - Mark tasks complete\n"
-        f"[{theme['success']}]TDL info <ID>[/]       - View task details",
-        title=f"[bold {theme['error']}]📝 Tasks[/]",
-        border_style=theme["error"],
-        padding=(1, 2)
-    )
-    
-    focus_commands = Panel(
-        "[bold orange1]Deep Work[/]\n\n"
-        f"[{theme['success']}]TDL work <ID>[/]      - Start deep work session\n"
-        "[dim]  • Timer with GIF animation[/]\n"
-        "[dim]  • Press SPACE to pause[/]\n"
-        "[dim]  • Extend or complete after[/]\n\n",
-        title="[bold orange1]⏱ Focus[/]",
-        border_style="orange1",
-        padding=(1, 2)
-    )
-    
-    org_commands = Panel(
-        f"[bold {theme['success']}]Organization & Stats[/]\n\n"
-        f"[{theme['success']}]TDL add cat <name>[/] - Add category\n"
-        f"[{theme['success']}]TDL cat[/]            - List categories\n"
-        f"[{theme['success']}]TDL stat[/]           - View statistics\n"
-        f"[{theme['success']}]TDL settings[/]       - App settings\n"
-        f"[{theme['success']}]TDL clear[/]          - Archive done\n"
-        f"[{theme['success']}]TDL hist[/]           - View history",
-        title=f"[bold {theme['success']}]🗂 Organize[/]",
-        border_style=theme["success"],
-        padding=(1, 2)
-    )
+    if not simplicity_mode:
+        # Welcome message with theme gradient
+        welcome_text = Text()
+        welcome_text.append("✨ ", style=f"bold {theme['warning']}")
+        welcome_text.append("Welcome to ", style="bold white")
+        welcome_text.append("T", style=f"bold {theme['primary']}")
+        welcome_text.append("D", style=f"bold {theme['secondary']}")
+        welcome_text.append("L", style=f"bold {theme['success']}")
+        welcome_text.append(" - Your ", style="bold white")
+        welcome_text.append(f"{get_theme().capitalize()}", style=f"bold {theme['secondary']}")
+        welcome_text.append(" Terminal Task Manager! ", style="bold white")
+        welcome_text.append("✨", style=f"bold {theme['warning']}")
+        console.print(Panel(welcome_text, style=f"bold {theme['secondary']}", padding=(1, 2)))
+        console.print()
+        
+        # Commands organized by category
+        task_commands = Panel(
+            f"[bold {theme['error']}]Task Management[/]\n\n"
+            f"[{theme['success']}]TDL db[/]              - View all tasks\n"
+            f"[{theme['success']}]TDL add[/]             - Add new task\n"
+            f"[{theme['success']}]TDL add ... -r[/]      - Add recurring task\n"
+            f"[{theme['success']}]TDL <ID> -d/-c/-t[/]   - Update task\n"
+            f"[{theme['success']}]TDL del <ID>[/]        - Delete task\n"
+            f"[{theme['success']}]TDL check[/]           - Mark tasks complete\n"
+            f"[{theme['success']}]TDL info <ID>[/]       - View task details",
+            title=f"[bold {theme['error']}]📝 Tasks[/]",
+            border_style=theme["error"],
+            padding=(1, 2)
+        )
+        
+        focus_commands = Panel(
+            "[bold orange1]Deep Work[/]\n\n"
+            f"[{theme['success']}]TDL work <ID>[/]      - Start deep work session\n"
+            "[dim]  • Timer with GIF animation[/]\n"
+            "[dim]  • Press SPACE to pause[/]\n"
+            "[dim]  • Extend or complete after[/]\n\n",
+            title="[bold orange1]⏱ Focus[/]",
+            border_style="orange1",
+            padding=(1, 2)
+        )
+        
+        org_commands = Panel(
+            f"[bold {theme['success']}]Organization & Stats[/]\n\n"
+            f"[{theme['success']}]TDL add cat <name>[/] - Add category\n"
+            f"[{theme['success']}]TDL cat[/]            - List categories\n"
+            f"[{theme['success']}]TDL stat[/]           - View statistics\n"
+            f"[{theme['success']}]TDL settings[/]       - App settings\n"
+            f"[{theme['success']}]TDL clear[/]          - Archive done\n"
+            f"[{theme['success']}]TDL hist[/]           - View history",
+            title=f"[bold {theme['success']}]🗂 Organize[/]",
+            border_style=theme["success"],
+            padding=(1, 2)
+        )
 
-    filter_commands = Panel(
-        f"[bold {theme['primary']}]Views & Filters[/]\n\n"
-        f"[{theme['success']}]TDL calendar[/]       - Interactive Calendar\n"
-        f"[{theme['success']}]TDL rc[/]             - Recurring tasks\n"
-        f"[{theme['success']}]TDL today[/]          - Due today\n"
-        f"[{theme['success']}]TDL tomorrow[/]       - Due tomorrow\n"
-        f"[{theme['success']}]TDL this-week[/]     - Due this week\n"
-        f"[{theme['success']}]TDL this-month[/]    - Due this month",
-        title=f"[bold {theme['primary']}]📅 Views[/]",
-        border_style=theme["primary"],
-        padding=(1, 2)
-    )
+        filter_commands = Panel(
+            f"[bold {theme['primary']}]Views & Filters[/]\n\n"
+            f"[{theme['success']}]TDL calendar[/]       - Interactive Calendar\n"
+            f"[{theme['success']}]TDL rc[/]             - Recurring tasks\n"
+            f"[{theme['success']}]TDL today[/]          - Due today\n"
+            f"[{theme['success']}]TDL tomorrow[/]       - Due tomorrow\n"
+            f"[{theme['success']}]TDL this-week[/]     - Due this week\n"
+            f"[{theme['success']}]TDL this-month[/]    - Due this month",
+            title=f"[bold {theme['primary']}]📅 Views[/]",
+            border_style=theme["primary"],
+            padding=(1, 2)
+        )
 
-    
-    # Display in columns (2x2 grid)
-    console.print(Columns([task_commands, focus_commands], equal=True, expand=True))
-    console.print(Columns([org_commands, filter_commands], equal=True, expand=True))
-    console.print()
-    
-    # Quick tips
-    tips = Panel(
-        f"[bold {theme['secondary']}]💡 Quick Tips:[/]\n\n"
-        f"• Use [{theme['error']}]-f 1[/] for important, [dim]-f -1[/] unimportant\n"
-        "• Set duration: [orange1]-t 2h30m[/]\n"
-        f"• Relative dates: [{theme['success']}]today[/], [{theme['success']}]tomorrow[/]\n"
-        f"• Type [{theme['primary']}]TDL <ID>[/] to update tasks",
-        title=f"[bold {theme['secondary']}]✨ Tips[/]",
-        border_style=theme["secondary"],
-        padding=(1, 2)
-    )
-    console.print(tips)
+        
+        # Display in columns (2x2 grid)
+        console.print(Columns([task_commands, focus_commands], equal=True, expand=True))
+        console.print(Columns([org_commands, filter_commands], equal=True, expand=True))
+        console.print()
+        
+        # Quick tips
+        tips = Panel(
+            f"[bold {theme['secondary']}]💡 Quick Tips:[/]\n\n"
+            f"• Use [{theme['error']}]-f 1[/] for important, [dim]-f -1[/] unimportant\n"
+            "• Set duration: [orange1]-t 2h30m[/]\n"
+            f"• Relative dates: [{theme['success']}]today[/], [{theme['success']}]tomorrow[/]\n"
+            f"• Type [{theme['primary']}]TDL <ID>[/] to update tasks",
+            title=f"[bold {theme['secondary']}]✨ Tips[/]",
+            border_style=theme["secondary"],
+            padding=(1, 2)
+        )
+        console.print(tips)
 
-    console.print()
+        console.print()
     
-    # Activity Heatmap (Bottom)
+    # Activity Heatmap (shown independently based on its own toggle)
     render_activity_heatmap()
     console.print()
     
-    # Theme footer
+    # Theme footer (always shown)
     footer_text = Text()
     footer_words = ["✨", "Type", "TDL", "db", "to", "view", "your", "tasks", "✨"]
     footer_colors = theme["rainbow_colors"]
