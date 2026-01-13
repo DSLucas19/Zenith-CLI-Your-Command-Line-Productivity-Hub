@@ -77,6 +77,9 @@ def bring_window_to_foreground():
 
 def send_completion_notification(task_title, elapsed_seconds):
     """Send a Windows toast notification when the session completes."""
+    # Always bring window to foreground first (most reliable action)
+    bring_window_to_foreground()
+    
     try:
         # Format duration
         hours = elapsed_seconds // 3600
@@ -91,20 +94,23 @@ def send_completion_notification(task_title, elapsed_seconds):
         display_title = task_title[:50] + "..." if len(task_title) > 50 else task_title
         
         if NOTIFICATIONS_AVAILABLE:
-            # Send Windows toast notification
-            toast(
-                "Deep Work Session Complete! 🎉",
-                f"{display_title}\n\nTime worked: {duration_str}",
-                duration="short",
-                on_click=None
-            )
+            try:
+                # Send Windows toast notification
+                # Wrapped in separate try-except due to win11toast library bugs
+                toast(
+                    "Deep Work Session Complete! 🎉",
+                    f"{display_title}\n\nTime worked: {duration_str}",
+                    duration="short",
+                    on_click=None
+                )
+            except Exception:
+                # win11toast library has known bugs with click handlers
+                # Silently ignore notification errors
+                pass
         
-        # Always bring window to foreground
-        bring_window_to_foreground()
-        
-    except Exception as e:
-        # Silently fail notification, but still try to bring window forward
-        bring_window_to_foreground()
+    except Exception:
+        # Any other errors in notification preparation
+        pass
 
 
 def set_console_size(width, height):

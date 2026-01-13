@@ -5,7 +5,7 @@ from rich.table import Table
 from rich.console import Console
 from rich import box
 from typing import Optional, List
-from datetime import datetime
+from datetime import datetime, timedelta
 import questionary
 from dateutil import parser as date_parser
 
@@ -1176,6 +1176,12 @@ def categories():
     console.print(table)
 
 
+@app.command(name="cat")
+def cat():
+    """Shortcut for categories command."""
+    categories()
+
+
 @app.command()
 def color(
     category: Optional[str] = typer.Argument(None, help="Category name"),
@@ -1224,13 +1230,13 @@ def color(
     # Filter out "overlapping" legacy composite categories (e.g. "Work, SAT")
     # if their individual parts exist separately.
     final_cats = []
-    simple_cats = {c for c in all_cats if "," not in c}
+    simple_cats_lower = {c.lower() for c in all_cats if "," not in c}
     
     for cat in all_cats:
         if "," in cat:
             parts = [p.strip() for p in cat.split(",")]
-            # If all parts exist as standalone categories, hide the composite one
-            if all(p in simple_cats for p in parts):
+            # If all parts exist as standalone categories (case-insensitive), hide the composite one
+            if all(p.lower() in simple_cats_lower for p in parts):
                 continue
         final_cats.append(cat)
         
